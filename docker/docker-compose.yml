@@ -1,0 +1,20 @@
+services:
+  clamav:
+    image: clamav/clamav:1.4-stable
+    container_name: clamav
+    environment:
+      CLAMD_STARTUP_TIMEOUT: "600"
+    ports:
+      - "3310:3310"
+    volumes:
+      - clamav-db:/var/lib/clamav
+    healthcheck:
+      # 官方镜像自带健康脚本，真实探测 clamd 就绪（PING/PONG）
+      test: ["CMD", "/health.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s   # 首次启动下载病毒库较慢
+
+volumes:
+  clamav-db:

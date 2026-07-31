@@ -1,0 +1,32 @@
+spring:
+  threads:
+    virtual:
+      enabled: true            # Web 请求与 @Async 均运行在虚拟线程上
+  servlet:
+    multipart:
+      max-file-size: 100MB     # 容器级第一道闸，超限直接 413
+      max-request-size: 110MB
+
+zxf:
+  virus-scan:
+    enabled: true
+    fail-strategy: CLOSED      # 扫描引擎故障时拒绝上传（安全优先）
+    max-file-size: 104857600   # 100MB，与 multipart 对齐
+    max-concurrent-scans: 16   # 虚拟线程 + 信号量背压
+    zip:
+      max-compression-ratio: 100
+      max-total-uncompressed: 1073741824   # 1GB
+      max-nesting-depth: 2
+    clamav:
+      host: ${CLAMAV_HOST:localhost}
+      port: ${CLAMAV_PORT:3310}
+      timeout: 30000
+    yara:
+      enabled: true
+      binary-path: ${YARA_BINARY:yara}
+      rules-path: "classpath:rules/malware.yar"
+      timeout-seconds: 60
+    storage:
+      base-path: ${UPLOAD_STORAGE:./data/upload-storage}
+      quarantine-path: ${UPLOAD_QUARANTINE:./data/upload-quarantine}
+      staging-path: ${UPLOAD_STAGING:./data/upload-staging}

@@ -1,0 +1,30 @@
+package zxf.upload.model;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+
+@Data
+@AllArgsConstructor
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class UploadResponse {
+    private String scanId;
+    private ScanStatus status;
+    private String message;
+    private String filePath;
+
+    public static UploadResponse scanning(String scanId) {
+        return new UploadResponse(scanId, ScanStatus.SCANNING, "扫描进行中", null);
+    }
+
+    public static UploadResponse of(String scanId, ScanResult result, String storedPath) {
+        String message = switch (result.getStatus()) {
+            case CLEAN -> "文件安全";
+            case INFECTED -> "检测到威胁: " + result.getThreat();
+            case REJECTED -> "文件被拒绝: " + result.getThreat();
+            case ERROR -> "扫描失败: " + result.getDetails();
+            case SCANNING -> "扫描进行中";
+        };
+        return new UploadResponse(scanId, result.getStatus(), message, storedPath);
+    }
+}
