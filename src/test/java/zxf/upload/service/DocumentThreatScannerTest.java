@@ -42,9 +42,11 @@ class DocumentThreatScannerTest {
             zos.closeEntry();
         }
 
-        String threat = scanner.scan(docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        DocumentThreatScanner.DocThreat threat =
+                scanner.scan(docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
 
-        assertThat(threat).isEqualTo("Office 文档包含 VBA 宏");
+        assertThat(threat).isEqualTo(new DocumentThreatScanner.DocThreat(
+                "Office 文档包含 VBA 宏", DocumentThreatScanner.DocThreat.Kind.MACRO));
     }
 
     @Test
@@ -66,7 +68,8 @@ class DocumentThreatScannerTest {
                 "%PDF-1.4\n1 0 obj<</JavaScript (app.alert) /OpenAction 2 0 R>>\n%%EOF");
 
         assertThat(scanner.scan(pdf, "application/pdf"))
-                .isEqualTo("PDF 包含自动执行的 JavaScript");
+                .isEqualTo(new DocumentThreatScanner.DocThreat(
+                        "PDF 包含自动执行的 JavaScript", DocumentThreatScanner.DocThreat.Kind.PDF_ACTION));
     }
 
     @Test
@@ -74,7 +77,8 @@ class DocumentThreatScannerTest {
         Path pdf = Files.writeString(tempDir.resolve("launch.pdf"),
                 "%PDF-1.4\n1 0 obj<</Launch /Action>>\n%%EOF");
 
-        assertThat(scanner.scan(pdf, "application/pdf")).contains("Launch");
+        assertThat(scanner.scan(pdf, "application/pdf")).isNotNull()
+                .extracting(DocumentThreatScanner.DocThreat::description).asString().contains("Launch");
     }
 
     @Test
@@ -90,7 +94,8 @@ class DocumentThreatScannerTest {
         Path pdf = Files.write(tempDir.resolve("boundary.pdf"), data);
 
         assertThat(scanner.scan(pdf, "application/pdf"))
-                .isEqualTo("PDF 包含自动执行的 JavaScript");
+                .isEqualTo(new DocumentThreatScanner.DocThreat(
+                        "PDF 包含自动执行的 JavaScript", DocumentThreatScanner.DocThreat.Kind.PDF_ACTION));
     }
 
     @Test
@@ -98,7 +103,8 @@ class DocumentThreatScannerTest {
         // 回归用例：文件小于 64B 重叠窗口时，末块 arraycopy 不得越界
         Path pdf = Files.writeString(tempDir.resolve("tiny.pdf"), "%PDF/Launch");
 
-        assertThat(scanner.scan(pdf, "application/pdf")).contains("Launch");
+        assertThat(scanner.scan(pdf, "application/pdf")).isNotNull()
+                .extracting(DocumentThreatScanner.DocThreat::description).asString().contains("Launch");
     }
 
     @Test

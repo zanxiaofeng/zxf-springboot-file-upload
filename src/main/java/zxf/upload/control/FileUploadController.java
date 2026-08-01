@@ -8,6 +8,7 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.ScanResult;
 import zxf.upload.model.UploadResponse;
 import zxf.upload.model.exception.FileRejectedException;
@@ -28,11 +29,19 @@ public class FileUploadController {
     private final StagingService stagingService;
     private final VirusScanService scanService;
     private final AsyncScanProcessor asyncProcessor;
+    private final VirusScanProperties properties;
 
     @PostMapping("/upload")
     public ResponseEntity<UploadResponse> upload(
             @RequestParam("file") MultipartFile file,
             @RequestHeader(value = "X-Scan-Async", defaultValue = "false") boolean async) {
+
+        // 大文件强制异步：同步全管道扫描耗时会超客户端/网关超时
+        long syncMax = properties.getSyncMaxFileSize();
+        if (!async && syncMax > 0 && file.getSize() > syncMax) {
+            throw new FileRejectedException("文件超过 " + syncMax / 1024 / 1024
+                    + "MB，同步扫描耗时过长，请使用异步上传（X-Scan-Async: true）");
+        }
 
         String filename = StringUtils.cleanPath(
                 file.getOriginalFilename() != null ? file.getOriginalFilename() : "unknown");

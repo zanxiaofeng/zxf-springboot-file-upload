@@ -10,6 +10,10 @@ import zxf.upload.model.exception.ScanFailedException;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -109,12 +113,63 @@ class VirusScanServiceTest {
         when(clamAvScanner.scan(any())).thenReturn(null);
         when(yaraScanner.scan(any())).thenReturn(null);
         when(documentThreatScanner.scan(any(), eq("application/pdf")))
-                .thenReturn("PDF 包含 Launch 动作（可能执行外部程序）");
+                .thenReturn(new DocumentThreatScanner.DocThreat(
+                        "PDF 包含 Launch 动作（可能执行外部程序）",
+                        DocumentThreatScanner.DocThreat.Kind.PDF_ACTION));
 
         ScanResult result = scanService.scanFile(stagingFile, "evil.pdf");
 
         assertThat(result.getStatus()).isEqualTo(ScanStatus.INFECTED);
         assertThat(result.getThreat()).contains("Launch");
+        verify(storageService).moveToQuarantine(stagingFile);
+    }
+
+    @Test
+    void scanFile_macroThreat_blockPolicy_quarantines() {
+        // 默认 BLOCK：含宏文档判威胁（有正常业务场景的良性宏也会被拦，属预期误伤）
+        passThrough("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        when(fileTypeValidator.isDocumentFormat(anyString())).thenReturn(true);
+        when(documentThreatScanner.scan(any(), anyString()))
+                .thenReturn(new DocumentThreatScanner.DocThreat(
+                        "Office 文档包含 VBA 宏", DocumentThreatScanner.DocThreat.Kind.MACRO));
+
+        ScanResult result = scanService.scanFile(stagingFile, "report.xlsx");
+
+        assertThat(result.getStatus()).isEqualTo(ScanStatus.INFECTED);
+        verify(storageService).moveToQuarantine(stagingFile);
+    }
+
+    @Test
+    void scanFile_macroThreat_flagPolicy_passesWithMarker() throws Exception {
+        properties.setMacroPolicy(VirusScanProperties.MacroPolicy.FLAG);
+        passThrough("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        when(fileTypeValidator.isDocumentFormat(anyString())).thenReturn(true);
+        when(documentThreatScanner.scan(any(), anyString()))
+                .thenReturn(new DocumentThreatScanner.DocThreat(
+                        "Office 文档包含 VBA 宏", DocumentThreatScanner.DocThreat.Kind.MACRO));
+        when(storageService.store(any(), anyString())).thenReturn("/stored/report.xlsx");
+
+        ScanResult result = scanService.scanFile(stagingFile, "report.xlsx");
+
+        assertThat(result.getStatus()).isEqualTo(ScanStatus.CLEAN);
+        assertThat(result.getThreat()).startsWith("macro-flagged");   // 放行打标贯穿到最终结果
+        verify(storageService).store(stagingFile, "report.xlsx");
+        verify(storageService, never()).moveToQuarantine(any());
+    }
+
+    @Test
+    void scanFile_activexThreat_flagPolicy_stillBlocked() {
+        // ActiveX 几乎无正常业务场景，FLAG 策略不适用，始终拦截
+        properties.setMacroPolicy(VirusScanProperties.MacroPolicy.FLAG);
+        passThrough("application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        when(fileTypeValidator.isDocumentFormat(anyString())).thenReturn(true);
+        when(documentThreatScanner.scan(any(), anyString()))
+                .thenReturn(new DocumentThreatScanner.DocThreat(
+                        "Office 文档包含 ActiveX 控件", DocumentThreatScanner.DocThreat.Kind.ACTIVE_X));
+
+        ScanResult result = scanService.scanFile(stagingFile, "evil.docx");
+
+        assertThat(result.getStatus()).isEqualTo(ScanStatus.INFECTED);
         verify(storageService).moveToQuarantine(stagingFile);
     }
 
@@ -160,5 +215,39 @@ class VirusScanServiceTest {
         assertThat(result.getDetails()).isEqualTo("/stored/raw.txt");
         verifyNoInteractions(fileTypeValidator, clamAvScanner, yaraScanner, documentThreatScanner);
         assertThat(stagingFile).doesNotExist();
+    }
+
+    @Test
+    void scanFile_concurrentCalls_neverExceedPermits() throws Exception {
+        // 信号量闸门在管道入口：同步/异步调用统一背压
+        properties.setMaxConcurrentScans(4);
+        scanService = new VirusScanService(properties, fileTypeValidator, clamAvScanner,
+                yaraScanner, documentThreatScanner, storageService);
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maxActive = new AtomicInteger();
+        when(fileTypeValidator.validate(any(), anyString())).thenAnswer(inv -> {
+            int current = active.incrementAndGet();
+            maxActive.accumulateAndGet(current, Math::max);
+            try {
+                Thread.sleep(20);
+            } finally {
+                active.decrementAndGet();
+            }
+            return new FileTypeValidator.TypeCheck(true, "text/plain", null);
+        });
+        when(clamAvScanner.scan(any())).thenReturn(null);
+        when(yaraScanner.scan(any())).thenReturn(null);
+        when(storageService.store(any(), anyString())).thenReturn("/stored/x");
+
+        ExecutorService pool = Executors.newFixedThreadPool(50);
+        for (int i = 0; i < 50; i++) {
+            int id = i;
+            pool.submit(() -> scanService.scanFile(Path.of("virtual-" + id), "f" + id + ".txt"));
+        }
+        pool.shutdown();
+        assertThat(pool.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(maxActive.get()).isLessThanOrEqualTo(4);   // 背压生效
+        assertThat(maxActive.get()).isGreaterThan(1);         // 且确实发生了并发
     }
 }

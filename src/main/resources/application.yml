@@ -11,12 +11,18 @@ zxf:
   virus-scan:
     enabled: true
     fail-strategy: CLOSED      # 扫描引擎故障时拒绝上传（安全优先）
+    macro-policy: BLOCK        # 含 VBA 宏文档处置：BLOCK=隔离；FLAG=放行并打标告警
     max-file-size: 104857600   # 100MB，与 multipart 对齐
-    max-concurrent-scans: 16   # 虚拟线程 + 信号量背压
+    sync-max-file-size: 20971520   # 20MB，超过则要求异步上传
+    sse-heartbeat-seconds: 15      # SSE 心跳间隔，防代理 idle 断连
+    max-concurrent-scans: 16   # 虚拟线程 + 信号量背压（同步/异步统一闸门）
+    result-retention-minutes: 30   # 异步结果缓存 TTL，到期淘汰防内存泄漏
     zip:
       max-compression-ratio: 100
       max-total-uncompressed: 1073741824   # 1GB
       max-nesting-depth: 2
+      max-entries: 10000                  # 条目总数上限（海量 entry 炸弹）
+      max-entry-uncompressed: 104857600   # 单 entry 解压上限 100MB
     clamav:
       host: ${CLAMAV_HOST:localhost}
       port: ${CLAMAV_PORT:3310}

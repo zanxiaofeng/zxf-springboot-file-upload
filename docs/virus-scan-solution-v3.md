@@ -15,7 +15,9 @@
 扫描是 IO 密集型负载（文件读写、INSTREAM socket、YARA 子进程等待），非常适合虚拟线程：
 
 - 开启 `spring.threads.virtual.enabled=true`，Spring Boot 4.1 自动将 Web 容器与 `@Async` 默认执行器切换为虚拟线程（`VirtualThreadTaskExecutor`/`SimpleAsyncTaskExecutor`），每个扫描任务一个虚拟线程，天然支持高并发上传；
-- 虚拟线程**无池化、无队列**，因此背压不能依赖线程池拒绝策略，改用 **`Semaphore` 信号量**限制并发扫描数（默认 16），许可耗尽时调用方阻塞等待（同步模式在 Web 虚拟线程上等待，成本极低）；
+- 虚拟线程**无池化、无队列**，因此背压不能依赖线程池拒绝策略，改用 **`Semaphore` 信号量**限制并发扫描数（默认 16），许可耗尽时调用方阻塞等待（虚拟线程上等待，成本极低）；
+- 信号量闸门收口在 `VirusScanService` 管道入口，**同步（Web 虚拟线程）与异步调用共用同一背压**，防止并发上传打爆 ClamAV/YARA 引擎；
+- ClamAV 外挂 **Resilience4j 熔断器**（capybara 客户端无 socket 超时）：引擎持续故障时快速失败，防止扫描线程长期阻塞耗尽信号量许可；
 - 注意避免 `synchronized` 钉住（pinning）载体线程：管道内全部使用 `java.util.concurrent` 与 NIO 文件 API，无 synchronized 块。
 
 ---
@@ -50,16 +52,23 @@ zxf-springboot-file-upload/
 │   │   ├── YaraScanner.java                         # YARA CLI 封装
 │   │   ├── FileTypeValidator.java                   # Tika 探测 + ZIP 炸弹流式检查
 │   │   ├── DocumentThreatScanner.java               # OOXML/OLE2/PDF 威胁检测（分块低内存）
-│   │   └── AsyncScanProcessor.java                  # 异步扫描 + SSE + 结果缓存 + 信号量背压
-│   └── support/rest/
-│       └── GlobalExceptionHandler.java
+│   │   └── AsyncScanProcessor.java                  # 异步扫描 + SSE + 结果缓存（Caffeine TTL）
+│   └── support/
+│       ├── ClamAvHealthIndicator.java               # ClamAV PING 健康检查（/actuator/health）
+│       └── rest/
+│           └── GlobalExceptionHandler.java
 ├── src/main/resources/
 │   ├── application.yml
 │   └── rules/malware.yar
 └── src/test/java/zxf/upload/
+    ├── EicarScanIT.java                             # 端到端：Testcontainers ClamAV + EICAR（failsafe）
     ├── service/VirusScanServiceTest.java
     ├── service/FileTypeValidatorTest.java
     ├── service/DocumentThreatScannerTest.java
+    ├── service/ClamAvScannerTest.java
+    ├── service/StagingServiceTest.java
+    ├── service/YaraScannerTest.java
+    ├── support/ClamAvHealthIndicatorTest.java
     └── control/FileUploadControllerTest.java
 ```
 
@@ -112,6 +121,39 @@ zxf-springboot-file-upload/
         <version>5.3.0</version>
     </dependency>
 
+    <!-- 异步扫描结果缓存 TTL 淘汰 -->
+    <dependency>
+        <groupId>com.github.ben-manes.caffeine</groupId>
+        <artifactId>caffeine</artifactId>
+    </dependency>
+
+    <!-- ClamAV 故障熔断（编程式使用，Boot 4 BOM 不管理单体模块，显式版本） -->
+    <dependency>
+        <groupId>io.github.resilience4j</groupId>
+        <artifactId>resilience4j-circuitbreaker</artifactId>
+        <version>2.3.0</version>
+    </dependency>
+
+    <!-- Actuator：ClamAV 健康检查端点 -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!-- 以下为 test scope：Boot 4 测试模块按技术拆分，需在 starter-test 之外显式声明 -->
+    <!-- @WebMvcTest 切片 -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-webmvc-test</artifactId>
+        <scope>test</scope>
+    </dependency>
+    <!-- EICAR 端到端集成测试：Testcontainers 启动真实 ClamAV（Boot 4 BOM 不管理，显式版本） -->
+    <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>junit-jupiter</artifactId>
+        <version>1.21.3</version>
+        <scope>test</scope>
+    </dependency>
     <dependency>
         <groupId>org.projectlombok</groupId>
         <artifactId>lombok</artifactId>
@@ -252,7 +294,8 @@ public class UploadResponse {
 
     public static UploadResponse of(String scanId, ScanResult result, String storedPath) {
         String message = switch (result.getStatus()) {
-            case CLEAN -> "文件安全";
+            // CLEAN 携带打标（macro-flagged / scan-engine-degraded）时透传给客户端
+            case CLEAN -> result.getThreat() == null ? "文件安全" : "文件安全（" + result.getThreat() + "）";
             case INFECTED -> "检测到威胁: " + result.getThreat();
             case REJECTED -> "文件被拒绝: " + result.getThreat();
             case ERROR -> "扫描失败: " + result.getDetails();
@@ -331,12 +374,30 @@ public class VirusScanProperties {
     /** 扫描引擎故障策略：CLOSED=拒绝上传（默认，安全优先）；OPEN=放行并告警 */
     private FailStrategy failStrategy = FailStrategy.CLOSED;
 
+    /**
+     * 含 VBA 宏文档处置策略：BLOCK=判威胁隔离（默认，安全优先）；FLAG=放行并打标告警。
+     * 仅适用于宏（正常业务表格存在良性宏）；ActiveX、PDF 危险动作不受此策略影响，始终拦截。
+     */
+    private MacroPolicy macroPolicy = MacroPolicy.BLOCK;
+
+    /** 同步上传大小阈值（字节）：超过则要求走异步通道（X-Scan-Async）。默认 20MB；0=不限制 */
+    @Min(0)
+    private long syncMaxFileSize = 20L << 20;
+
+    /** SSE 心跳间隔（秒）：防止中间代理 idle 断连（nginx 默认 60s） */
+    @Min(1)
+    private long sseHeartbeatSeconds = 15;
+
     @Min(1024)
     private long maxFileSize = 100 * 1024 * 1024; // 100MB
 
-    /** 并发扫描许可数（虚拟线程 + 信号量背压） */
+    /** 并发扫描许可数（虚拟线程 + 信号量背压，同步/异步统一闸门） */
     @Min(1)
     private int maxConcurrentScans = 16;
+
+    /** 异步扫描结果缓存保留时长（分钟），到期自动淘汰防内存泄漏 */
+    @Min(1)
+    private long resultRetentionMinutes = 30;
 
     @Valid
     private ZipGuard zip = new ZipGuard();
@@ -367,6 +428,8 @@ public class VirusScanProperties {
 
     public enum FailStrategy { OPEN, CLOSED }
 
+    public enum MacroPolicy { BLOCK, FLAG }
+
     @Data
     public static class ZipGuard {
         /** 单文件压缩比上限 */
@@ -375,6 +438,10 @@ public class VirusScanProperties {
         private long maxTotalUncompressed = 1L << 30;
         /** 嵌套压缩包最大深度 */
         private int maxNestingDepth = 2;
+        /** 条目总数上限（防海量空 entry 炸弹：遍历本身即 DoS 向量） */
+        private long maxEntries = 10_000L;
+        /** 单 entry 解压后大小上限（默认 100MB，与 maxFileSize 对齐） */
+        private long maxEntryUncompressed = 100L << 20;
     }
 
     @Data
@@ -410,27 +477,21 @@ package zxf.upload.config;
 
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * spring.threads.virtual.enabled=true 时，Boot 自动装配的
  * applicationTaskExecutor 即 SimpleAsyncTaskExecutor(virtual threads)，
  * @Async 默认使用它：每个扫描任务一个虚拟线程，无需手工声明执行器。
- * 并发上限由 AsyncScanProcessor 中的 Semaphore 控制。
+ * 并发上限由 VirusScanService 入口的 Semaphore 统一控制。
+ * @EnableScheduling 供 AsyncScanProcessor 的 SSE 心跳使用。
  */
 @Configuration
 @EnableAsync
+@EnableScheduling
 public class AsyncConfig {
 }
 ```
-
-> 如需显式声明（便于在日志/监控中识别），也可注册：
-> ```java
-> @Bean
-> public AsyncTaskExecutor virusScanExecutor() {
->     return new SimpleAsyncTaskExecutor(
->             Thread.ofVirtual().name("virus-scan-", 0).factory());
-> }
-> ```
 
 ---
 
@@ -499,6 +560,12 @@ public class StagingService {
         try (InputStream in = file.getInputStream()) {
             Files.copy(in, stagingFile, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
+            // 落盘失败（磁盘满/IO 错误）时清理残留的不完整文件
+            try {
+                Files.deleteIfExists(stagingFile);
+            } catch (IOException cleanupError) {
+                log.warn("清理失败的暂存文件失败: {}", stagingFile, cleanupError);
+            }
             throw new FileRejectedException("文件暂存失败: " + e.getMessage());
         }
         log.debug("File staged: {} -> {}", original, stagingFile);
@@ -514,6 +581,9 @@ public class StagingService {
 ```java
 package zxf.upload.service;
 
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import xyz.capybara.clamav.ClamavClient;
@@ -525,29 +595,64 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.stream.Collectors;
 
 /**
  * ClamAV 封装。第三方 SDK 类型（xyz.capybara.*）不出本类，
  * 调用方只接收 String threat / null，避免类型耦合。
  * 引擎故障抛 ScanFailedException，由管道按 fail-strategy 处理。
+ *
+ * 熔断保护：capybara 2.1.2 无 socket 超时配置，ClamAV 挂起时扫描线程会
+ * 长时间阻塞。熔断器在失败率超阈值后快速失败（不再触碰引擎），
+ * 防止故障级联耗尽信号量许可导致全服务不可用。
  */
 @Slf4j
 @Component
 public class ClamAvScanner {
     private final ClamavClient client;
+    private final CircuitBreaker circuitBreaker;
 
     public ClamAvScanner(VirusScanProperties properties) {
-        VirusScanProperties.ClamAv cfg = properties.getClamav();
-        // capybara 2.1.2 构造器不支持 socket timeout 配置（ClamAV 挂起时依赖 TCP 层超时兜底）
-        this.client = new ClamavClient(cfg.getHost(), cfg.getPort(), Platform.JVM_PLATFORM);
+        this(createClient(properties.getClamav()));
+    }
+
+    /** capybara 2.1.2 构造器不支持 socket timeout 配置（ClamAV 挂起时依赖熔断器兜底） */
+    private static ClamavClient createClient(VirusScanProperties.ClamAv cfg) {
+        return new ClamavClient(cfg.getHost(), cfg.getPort(), Platform.JVM_PLATFORM);
+    }
+
+    /** 包私有构造：测试注入 mock client */
+    ClamAvScanner(ClamavClient client) {
+        this.client = client;
+        this.circuitBreaker = CircuitBreaker.of("clamav", CircuitBreakerConfig.custom()
+                .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+                .slidingWindowSize(10)
+                .minimumNumberOfCalls(5)
+                .failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .permittedNumberOfCallsInHalfOpenState(3)
+                .build());
     }
 
     /**
      * @return null = 干净；非 null = 病毒描述
-     * @throws ScanFailedException ClamAV 服务不可达/协议错误
+     * @throws ScanFailedException ClamAV 服务不可达/协议错误/熔断中
      */
     public String scan(Path file) {
+        try {
+            return circuitBreaker.executeSupplier(() -> doScan(file));
+        } catch (CallNotPermittedException e) {
+            throw new ScanFailedException("ClamAV 熔断中，扫描暂时不可用", e);
+        }
+    }
+
+    /** Actuator 健康检查使用（PING/PONG） */
+    public void ping() {
+        client.ping();
+    }
+
+    private String doScan(Path file) {
         try (InputStream in = Files.newInputStream(file)) {
             xyz.capybara.clamav.commands.scan.result.ScanResult result = client.scan(in);
             if (result instanceof xyz.capybara.clamav.commands.scan.result.ScanResult.VirusFound vf) {
@@ -565,7 +670,7 @@ public class ClamAvScanner {
 }
 ```
 
-> 备注：`xyz.capybara:clamav-client` 的 INSTREAM 分块受 ClamAV `StreamMaxLength` 限制（默认 100MB，与 maxFileSize 对齐即可）。如后续遇兼容性问题，可直接实现 INSTREAM 协议替换，接口签名不变。
+> 备注：`xyz.capybara:clamav-client` 的 INSTREAM 分块受 ClamAV `StreamMaxLength` 限制（默认 100MB，与 maxFileSize 对齐即可）。该库 2.1.2（2022-02）后停更，如后续遇兼容性问题，可直接实现 INSTREAM 协议替换（顺带收回 socket timeout 能力），接口签名不变。
 
 ---
 
@@ -599,7 +704,8 @@ public class YaraScanner {
 
     public YaraScanner(VirusScanProperties properties) {
         this.config = properties.getYara();
-        this.rulesPath = resolveRulesPath(config.getRulesPath());
+        // enabled=false 是完整逃生舱：不解析规则路径（规则文件缺失也能启动）
+        this.rulesPath = config.isEnabled() ? resolveRulesPath(config.getRulesPath()) : null;
     }
 
     /**
@@ -791,10 +897,12 @@ public class FileTypeValidator {
     }
 
     /**
-     * 流式 ZIP 检查：
-     * - getSize() 返回 -1 时按实际读取字节计数；
+     * 流式 ZIP 检查（OWASP 解压炸弹防护五维度）：
+     * - 条目总数上限（海量空 entry 炸弹，遍历本身即 DoS 向量）；
+     * - 单 entry 解压大小上限；
+     * - getSize() 返回 -1 时按实际读取字节计数（边读边校验，超限即中断）；
      * - 累计解压总量绝对上限；
-     * - 嵌套压缩包深度限制（递归炸弹）。
+     * - 压缩比上限 + 嵌套压缩包深度限制（递归炸弹）。
      *
      * @return null = 通过；非 null = 拒绝原因
      */
@@ -811,19 +919,34 @@ public class FileTypeValidator {
         }
 
         long totalUncompressed = 0;
+        long entryCount = 0;
         try (InputStream in = Files.newInputStream(file);
              ZipArchiveInputStream archive = new ZipArchiveInputStream(in)) {
             ZipArchiveEntry entry;
             byte[] buffer = new byte[8192];
             while ((entry = archive.getNextZipEntry()) != null) {
+                if (++entryCount > guard.getMaxEntries()) {
+                    return "疑似 ZIP 炸弹，条目数超过 " + guard.getMaxEntries();
+                }
                 long entrySize = entry.getSize();
                 if (entrySize >= 0) {
+                    if (entrySize > guard.getMaxEntryUncompressed()) {
+                        return singleEntryBombMessage(guard);
+                    }
                     totalUncompressed += entrySize;
                 } else {
-                    // 未知大小：实际读取计数
+                    // 未知大小：实际读取计数，单 entry 与累计超限均即时中断
+                    long entryBytes = 0;
                     int n;
                     while ((n = archive.read(buffer)) != -1) {
+                        entryBytes += n;
+                        if (entryBytes > guard.getMaxEntryUncompressed()) {
+                            return singleEntryBombMessage(guard);
+                        }
                         totalUncompressed += n;
+                        if (totalUncompressed > guard.getMaxTotalUncompressed()) {
+                            return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
+                        }
                     }
                 }
                 if (totalUncompressed > guard.getMaxTotalUncompressed()) {
@@ -845,6 +968,10 @@ public class FileTypeValidator {
         return null;
     }
 
+    private String singleEntryBombMessage(VirusScanProperties.ZipGuard guard) {
+        return "疑似 ZIP 炸弹，单文件解压大小超过 " + (guard.getMaxEntryUncompressed() >> 20) + "MB";
+    }
+
     private String extractExtension(String filename) {
         if (filename == null || !filename.contains(".")) {
             return "";
@@ -856,7 +983,7 @@ public class FileTypeValidator {
 
 ---
 
-## Task 9: DocumentThreatScanner（分块低内存 + POI 真实宏提取）
+## Task 9: DocumentThreatScanner（分块低内存 + POI 真实宏提取 + 威胁分级）
 
 ```java
 package zxf.upload.service;
@@ -898,9 +1025,18 @@ public class DocumentThreatScanner {
     };
 
     /**
-     * @return null = 干净/非文档；非 null = 威胁描述
+     * 文档威胁检出。kind 供管道按策略分级处置：
+     * MACRO（VBA 宏）存在正常业务场景，可按 macro-policy 放行打标；
+     * ACTIVE_X / PDF_ACTION 几乎无正常场景，始终拦截。
      */
-    public String scan(Path file, String detectedMime) {
+    public record DocThreat(String description, Kind kind) {
+        public enum Kind { MACRO, ACTIVE_X, PDF_ACTION }
+    }
+
+    /**
+     * @return null = 干净/非文档；非 null = 威胁检出
+     */
+    public DocThreat scan(Path file, String detectedMime) {
         String filename = file.getFileName().toString().toLowerCase(Locale.ROOT);
         try {
             if (filename.endsWith(".docx") || filename.endsWith(".xlsx") || filename.endsWith(".pptx")) {
@@ -937,11 +1073,11 @@ public class DocumentThreatScanner {
             }
             if (hasVba) {
                 log.warn("OOXML contains VBA project: {}", file.getFileName());
-                return "Office 文档包含 VBA 宏";
+                return new DocThreat("Office 文档包含 VBA 宏", DocThreat.Kind.MACRO);
             }
             if (hasActiveX) {
                 log.warn("OOXML contains ActiveX controls: {}", file.getFileName());
-                return "Office 文档包含 ActiveX 控件";
+                return new DocThreat("Office 文档包含 ActiveX 控件", DocThreat.Kind.ACTIVE_X);
             }
             return null;
         }
@@ -959,7 +1095,7 @@ public class DocumentThreatScanner {
             for (String token : SUSPICIOUS_MACRO_TOKENS) {
                 if (code.contains(token)) {
                     log.warn("OLE2 contains suspicious macro token '{}' in {}", token, file.getFileName());
-                    return "OLE2 文档包含可疑 VBA 宏（命中: " + token + "）";
+                    return new DocThreat("OLE2 文档包含可疑 VBA 宏（命中: " + token + "）", DocThreat.Kind.MACRO);
                 }
             }
             log.info("OLE2 contains benign macros: {}", file.getFileName());
@@ -985,11 +1121,11 @@ public class DocumentThreatScanner {
                 if (text.contains("/openaction")) hasOpenAction = true;
                 if (text.contains("/launch")) {
                     log.warn("PDF contains /Launch action: {}", file.getFileName());
-                    return "PDF 包含 Launch 动作（可能执行外部程序）";
+                    return new DocThreat("PDF 包含 Launch 动作（可能执行外部程序）", DocThreat.Kind.PDF_ACTION);
                 }
                 if (hasJavaScript && hasOpenAction) {
                     log.warn("PDF contains JavaScript with OpenAction: {}", file.getFileName());
-                    return "PDF 包含自动执行的 JavaScript";
+                    return new DocThreat("PDF 包含自动执行的 JavaScript", DocThreat.Kind.PDF_ACTION);
                 }
                 // 末尾重叠字节移回首部防止关键字跨块漏检；末块不足 OVERLAP 时按实际长度
                 headLen = Math.min(len, OVERLAP);
@@ -1018,6 +1154,7 @@ import zxf.upload.model.exception.ScanFailedException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.Semaphore;
 
 /**
  * 扫描管道。输入为 staging 文件 Path，拥有该文件的完整生命周期：
@@ -1025,6 +1162,9 @@ import java.nio.file.Path;
  * - INFECTED：移入隔离区；
  * - REJECTED/ERROR：删除 staging 文件。
  * 调用方只拿结果，不接触临时文件。
+ *
+ * 并发闸门：信号量在管道入口统一 acquire，同步（Web 虚拟线程）与异步
+ * 调用共用同一背压，防止并发上传打爆 ClamAV/YARA 引擎。
  */
 @Slf4j
 @Service
@@ -1035,6 +1175,7 @@ public class VirusScanService {
     private final YaraScanner yaraScanner;
     private final DocumentThreatScanner documentThreatScanner;
     private final FileStorageService storageService;
+    private final Semaphore scanPermits;
 
     public VirusScanService(VirusScanProperties properties,
                             FileTypeValidator fileTypeValidator,
@@ -1048,6 +1189,7 @@ public class VirusScanService {
         this.yaraScanner = yaraScanner;
         this.documentThreatScanner = documentThreatScanner;
         this.storageService = storageService;
+        this.scanPermits = new Semaphore(properties.getMaxConcurrentScans());
     }
 
     /**
@@ -1055,6 +1197,20 @@ public class VirusScanService {
      * @return CLEAN 时 details 为正式存储路径；其余状态 staging 文件已被妥善处理
      */
     public ScanResult scanFile(Path stagingFile, String originalFilename) {
+        try {
+            scanPermits.acquire();   // 背压闸门：许可耗尽时（虚拟线程）挂起等待，成本极低
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ScanFailedException("扫描排队被中断", e);
+        }
+        try {
+            return doScanWithCleanup(stagingFile, originalFilename);
+        } finally {
+            scanPermits.release();
+        }
+    }
+
+    private ScanResult doScanWithCleanup(Path stagingFile, String originalFilename) {
         try {
             ScanResult result = doScan(stagingFile, originalFilename);
             switch (result.getStatus()) {
@@ -1066,6 +1222,7 @@ public class VirusScanService {
                             .status(ScanStatus.CLEAN)
                             .detectedMime(result.getDetectedMime())
                             .details(stored)
+                            .threat(result.getThreat())   // 保留打标（macro-flagged / scan-engine-degraded）
                             .build();
                 }
                 case INFECTED -> {
@@ -1129,9 +1286,20 @@ public class VirusScanService {
 
         // 阶段 4：文档威胁（复用 mime，不重复探测）
         if (fileTypeValidator.isDocumentFormat(mime)) {
-            String docThreat = documentThreatScanner.scan(stagingFile, mime);
+            DocumentThreatScanner.DocThreat docThreat = documentThreatScanner.scan(stagingFile, mime);
             if (docThreat != null) {
-                return ScanResult.infected(stagingFile, docThreat);
+                // 宏策略分级：FLAG 放行并打标告警；ActiveX/PDF 危险动作始终拦截
+                if (docThreat.kind() == DocumentThreatScanner.DocThreat.Kind.MACRO
+                        && properties.getMacroPolicy() == VirusScanProperties.MacroPolicy.FLAG) {
+                    log.warn("含宏文档按 FLAG 策略放行: {} - {}", originalFilename, docThreat.description());
+                    return ScanResult.builder()
+                            .status(ScanStatus.CLEAN)
+                            .stagingPath(stagingFile)
+                            .detectedMime(mime)
+                            .threat("macro-flagged: " + docThreat.description())
+                            .build();
+                }
+                return ScanResult.infected(stagingFile, docThreat.description());
             }
         }
 
@@ -1221,13 +1389,16 @@ public class FileStorageService {
 
 ---
 
-## Task 12: AsyncScanProcessor（虚拟线程 + 信号量背压 + SSE/轮询）
+## Task 12: AsyncScanProcessor（虚拟线程 + SSE/轮询 + Caffeine 结果缓存）
 
 ```java
 package zxf.upload.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import zxf.upload.config.VirusScanProperties;
@@ -1237,45 +1408,70 @@ import zxf.upload.model.UploadResponse;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 异步扫描 + 结果分发。
  *
  * 并发模型：@Async 在虚拟线程上执行（每任务一个虚拟线程）。
- * 虚拟线程无池化，背压由 Semaphore(maxConcurrentScans) 提供：
- * 许可耗尽时提交方（Web 虚拟线程）阻塞等待，成本极低。
+ * 背压由 VirusScanService 入口的 Semaphore 统一提供（同步/异步共用闸门）。
  *
  * 时序安全：
  * 1. 结果先入 completedScans 缓存；
  * 2. registerEmitter 时若结果已存在，立即回放并结束 —— 客户端何时连接都能拿到结果；
  * 3. 轮询端点 getResult 任何时刻可拿当前状态。
+ *
+ * 内存治理：两个缓存均为 Caffeine，expireAfterWrite 自动淘汰，
+ * 防止结果与孤儿 emitter 无限堆积导致内存泄漏。
  */
 @Slf4j
 @Service
 public class AsyncScanProcessor {
     private final VirusScanService scanService;
-    private final Semaphore scanPermits;
 
-    private final Map<String, SseEmitter> pendingEmitters = new ConcurrentHashMap<>();
-    private final Map<String, UploadResponse> completedScans = new ConcurrentHashMap<>();
+    /** SSE 连接等待中的 emitter；TTL 略高于 emitter 超时（300s），正常路径由 onCompletion/onTimeout 移除 */
+    private final Cache<String, SseEmitter> pendingEmitters;
+    /** 已完成扫描结果，供 SSE 回放与轮询兜底 */
+    private final Cache<String, UploadResponse> completedScans;
 
     public AsyncScanProcessor(VirusScanService scanService, VirusScanProperties properties) {
         this.scanService = scanService;
-        this.scanPermits = new Semaphore(properties.getMaxConcurrentScans());
+        long retention = properties.getResultRetentionMinutes();
+        this.pendingEmitters = Caffeine.newBuilder()
+                .expireAfterWrite(10, TimeUnit.MINUTES)
+                .maximumSize(10_000)
+                .build();
+        this.completedScans = Caffeine.newBuilder()
+                .expireAfterWrite(retention, TimeUnit.MINUTES)
+                .maximumSize(100_000)
+                .build();
     }
 
     /** 轮询兜底端点使用 */
     public UploadResponse getResult(String scanId) {
-        UploadResponse done = completedScans.get(scanId);
+        UploadResponse done = completedScans.getIfPresent(scanId);
         return done != null ? done : UploadResponse.scanning(scanId);
+    }
+
+    /**
+     * SSE 心跳：向等待中的 emitter 周期发送注释帧，防止中间代理
+     * （nginx 默认 60s idle）在长扫描期间断开连接。发送失败的 emitter 即刻移除。
+     */
+    @Scheduled(fixedRateString = "${zxf.virus-scan.sse-heartbeat-seconds:15}", timeUnit = TimeUnit.SECONDS)
+    public void sendHeartbeats() {
+        pendingEmitters.asMap().forEach((scanId, emitter) -> {
+            try {
+                emitter.send(SseEmitter.event().comment("hb"));
+            } catch (Exception e) {
+                pendingEmitters.asMap().remove(scanId);
+                log.debug("SSE 心跳发送失败，移除 emitter: {}", scanId);
+            }
+        });
     }
 
     public void registerEmitter(String scanId, SseEmitter emitter) {
         // 先查结果缓存：扫描可能已先于 SSE 连接完成
-        UploadResponse done = completedScans.get(scanId);
+        UploadResponse done = completedScans.getIfPresent(scanId);
         if (done != null) {
             try {
                 emitter.send(SseEmitter.event().name(eventName(done.getStatus())).data(done));
@@ -1286,9 +1482,9 @@ public class AsyncScanProcessor {
             return;
         }
         pendingEmitters.put(scanId, emitter);
-        emitter.onCompletion(() -> pendingEmitters.remove(scanId));
+        emitter.onCompletion(() -> pendingEmitters.asMap().remove(scanId));
         emitter.onTimeout(() -> {
-            pendingEmitters.remove(scanId);
+            pendingEmitters.asMap().remove(scanId);
             log.warn("SSE emitter 超时: {}", scanId);
         });
     }
@@ -1297,24 +1493,16 @@ public class AsyncScanProcessor {
     public void processScan(String scanId, Path stagingFile, String filename) {
         UploadResponse response;
         try {
-            scanPermits.acquire();          // 背压：超过 maxConcurrentScans 时虚拟线程挂起等待
-            try {
-                ScanResult result = scanService.scanFile(stagingFile, filename);
-                String storedPath = result.isClean() ? result.getDetails() : null;
-                response = UploadResponse.of(scanId, result, storedPath);
-            } finally {
-                scanPermits.release();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描被中断", null);
+            ScanResult result = scanService.scanFile(stagingFile, filename);
+            String storedPath = result.isClean() ? result.getDetails() : null;
+            response = UploadResponse.of(scanId, result, storedPath);
         } catch (Exception e) {
             log.error("异步扫描失败: scanId={}", scanId, e);
             response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描失败: " + e.getMessage(), null);
         }
 
         completedScans.put(scanId, response);
-        SseEmitter emitter = pendingEmitters.remove(scanId);
+        SseEmitter emitter = pendingEmitters.asMap().remove(scanId);
         if (emitter != null) {
             try {
                 emitter.send(SseEmitter.event().name(eventName(response.getStatus())).data(response));
@@ -1352,6 +1540,7 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.ScanResult;
 import zxf.upload.model.UploadResponse;
 import zxf.upload.model.exception.FileRejectedException;
@@ -1372,11 +1561,19 @@ public class FileUploadController {
     private final StagingService stagingService;
     private final VirusScanService scanService;
     private final AsyncScanProcessor asyncProcessor;
+    private final VirusScanProperties properties;
 
     @PostMapping("/upload")
     public ResponseEntity<UploadResponse> upload(
             @RequestParam("file") MultipartFile file,
             @RequestHeader(value = "X-Scan-Async", defaultValue = "false") boolean async) {
+
+        // 大文件强制异步：同步全管道扫描耗时会超客户端/网关超时
+        long syncMax = properties.getSyncMaxFileSize();
+        if (!async && syncMax > 0 && file.getSize() > syncMax) {
+            throw new FileRejectedException("文件超过 " + syncMax / 1024 / 1024
+                    + "MB，同步扫描耗时过长，请使用异步上传（X-Scan-Async: true）");
+        }
 
         String filename = StringUtils.cleanPath(
                 file.getOriginalFilename() != null ? file.getOriginalFilename() : "unknown");
@@ -1420,6 +1617,7 @@ public class FileUploadController {
 ```java
 package zxf.upload.support.rest;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -1429,6 +1627,11 @@ import zxf.upload.model.exception.FileRejectedException;
 import zxf.upload.model.exception.ScanFailedException;
 import zxf.upload.model.exception.VirusDetectedException;
 
+/**
+ * 全局异常映射。对外响应只携带错误码与通用消息，
+ * 内部细节（引擎地址、路径、堆栈）一律落内部日志，不泄漏给客户端。
+ */
+@Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -1448,14 +1651,24 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ScanFailedException.class)
     public ResponseEntity<ErrorResponse> handleScanFailed(ScanFailedException ex) {
+        // 引擎故障详情（host:port、内部路径）只进日志，对外通用消息
+        log.error("扫描引擎故障: {}", ex.getMessage(), ex);
         return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                .body(new ErrorResponse("SCAN_ENGINE_ERROR", ex.getMessage()));
+                .body(new ErrorResponse("SCAN_ENGINE_ERROR", "扫描引擎暂时不可用，请稍后重试"));
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     public ResponseEntity<ErrorResponse> handleMaxSize(MaxUploadSizeExceededException ex) {
         return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
                 .body(new ErrorResponse("FILE_TOO_LARGE", "文件超过大小限制"));
+    }
+
+    /** 兜底：未预见异常统一 500，避免容器默认错误页泄漏细节 */
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex) {
+        log.error("未预期异常: {}", ex.getMessage(), ex);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(new ErrorResponse("INTERNAL_ERROR", "服务器内部错误"));
     }
 }
 ```
@@ -1531,12 +1744,18 @@ zxf:
   virus-scan:
     enabled: true
     fail-strategy: CLOSED      # 扫描引擎故障时拒绝上传（安全优先）
+    macro-policy: BLOCK        # 含 VBA 宏文档处置：BLOCK=隔离；FLAG=放行并打标告警
     max-file-size: 104857600   # 100MB，与 multipart 对齐
-    max-concurrent-scans: 16   # 虚拟线程 + 信号量背压
+    sync-max-file-size: 20971520   # 20MB，超过则要求异步上传
+    sse-heartbeat-seconds: 15      # SSE 心跳间隔，防代理 idle 断连
+    max-concurrent-scans: 16   # 虚拟线程 + 信号量背压（同步/异步统一闸门）
+    result-retention-minutes: 30   # 异步结果缓存 TTL，到期淘汰防内存泄漏
     zip:
       max-compression-ratio: 100
       max-total-uncompressed: 1073741824   # 1GB
       max-nesting-depth: 2
+      max-entries: 10000                  # 条目总数上限（海量 entry 炸弹）
+      max-entry-uncompressed: 104857600   # 单 entry 解压上限 100MB
     clamav:
       host: ${CLAMAV_HOST:localhost}
       port: ${CLAMAV_PORT:3310}
@@ -1556,7 +1775,7 @@ zxf:
 ```yaml
 services:
   clamav:
-    image: clamav/clamav:1.4-stable
+    image: clamav/clamav:1.4
     container_name: clamav
     environment:
       CLAMD_STARTUP_TIMEOUT: "600"
@@ -1588,7 +1807,9 @@ volumes:
 - CLEAN → staging 文件被删除且调用 store；
 - INFECTED → 调用 moveToQuarantine；
 - REJECTED/ERROR → staging 被删除（`Files.exists` 断言无泄漏）；
-- ScanFailedException + failStrategy=CLOSED → 异常上抛；OPEN → 降级入库并打标 `scan-engine-degraded`。
+- ScanFailedException + failStrategy=CLOSED → 异常上抛；OPEN → 降级入库并打标 `scan-engine-degraded`（断言先 store 后 delete）；
+- 宏策略分级：MACRO + BLOCK（默认）→ 隔离；MACRO + FLAG → 放行且打标 `macro-flagged` 贯穿到最终结果；ACTIVE_X + FLAG → 仍拦截；
+- 并发闸门：50 并发调用 `scanFile`，断言同时在扫数量 ≤ `max-concurrent-scans`（同步/异步统一背压生效）。
 
 ### FileTypeValidatorTest
 
@@ -1596,7 +1817,28 @@ volumes:
 - csv 被 Tika 探测为 text/plain → 通过；
 - EICAR 串写入 `.txt` → 类型层通过（留给 ClamAV 层）；
 - ZIP 炸弹样例（高压缩比构造）→ REJECTED；
-- 未知大小 entry（streaming zip）→ 按实际读取计数，不误判。
+- 未知大小 entry（streaming zip）→ 按实际读取计数，不误判；
+- 海量空 entry（条目数超限）→ REJECTED；
+- 单 entry 解压超限（总量未超限时）→ REJECTED。
+
+### ClamAvScannerTest
+
+- 干净文件 → null；引擎异常 → ScanFailedException 包装；
+- 持续失败达阈值 → 熔断打开后快速失败（"熔断中"）且不再触碰引擎；
+- ping 委托 client（供健康检查）。
+
+### ClamAvHealthIndicatorTest
+
+- PING 成功 → UP；PING 异常 → DOWN。
+
+### StagingServiceTest
+
+- 空文件/非法扩展名 → 400 预检拦截；
+- 落盘中途失败 → 抛 FileRejectedException 且 staging 目录无残留。
+
+### YaraScannerTest
+
+- `enabled=false` 时构造不解析规则路径（规则文件缺失也能启动）、scan 直接返回 null。
 
 ### DocumentThreatScannerTest
 
@@ -1608,13 +1850,23 @@ volumes:
 ### FileUploadControllerTest（@WebMvcTest）
 
 - 同步 CLEAN → 200；INFECTED → 422 VIRUS_DETECTED；REJECTED → 400 FILE_REJECTED；
+- CLEAN 携带打标 → message 透传（"文件安全（macro-flagged: …）"）；
+- 同步超 `sync-max-file-size` → 400 并提示走异步（不落盘）；异步超阈值 → 202；
+- 扫描引擎故障 → 502 SCAN_ENGINE_ERROR 且响应消息脱敏（不含引擎地址等内部细节）；
+- 未预期异常 → 兜底 500 INTERNAL_ERROR；
 - 异步时序用例：先 POST 拿到 scanId，扫描完成后**再**连 SSE → 仍能收到 complete 事件（回放）；`GET /scan/{scanId}` 轮询返回终态；
-- 并发 50 个异步上传，断言同时在扫的数量不超过 `max-concurrent-scans`（信号量背压生效）；
+- SSE 心跳：存活 emitter 收到注释帧；失效 emitter 被移除且不再接收完成事件；
 - 空文件 → 400；超大文件 → 413。
 
-### 集成测试（可选，Testcontainers）
+> 并发背压用例随信号量闸门一并收归 VirusScanServiceTest（管道入口统一验证）。
 
-- 容器启动 ClamAV，上传 EICAR 文件断言 422 —— 端到端验证管道与 INSTREAM 兼容性。
+### 集成测试（EicarScanIT，Testcontainers + failsafe）
+
+- `@Testcontainers(disabledWithoutDocker = true)` + `@SpringBootTest(RANDOM_PORT)`，容器启动 `clamav/clamav:1.4`，`Wait.forListeningPort()` 等待就绪（clamd 加载完病毒库才监听端口，端口可连即就绪，首次下载库较慢故启动超时放宽至 10min）；
+- `@DynamicPropertySource` 注入 clamav host/port、`yara.enabled=false`（环境无 yara CLI）、临时存储目录；
+- 用 JDK `HttpClient` + `@LocalServerPort` 手工构造 multipart 请求（Boot 4 `TestRestTemplate` auto-config 兼容性有问题，JDK 原生更简洁无额外依赖）；
+- 上传 EICAR 文件断言 422 + `Eicar-Test-Signature`；上传干净文件断言 200 CLEAN —— 端到端验证 multipart 解析、Tika、INSTREAM 协议兼容性与隔离动作；
+- `*IT` 命名由 maven-failsafe-plugin 在 `verify` 阶段执行，`mvn test` 不跑（避免 Docker 依赖拖慢日常单测）。
 
 > EICAR 测试串（无害，ClamAV 必报 `Eicar-Test-Signature`）：
 > `X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*`
@@ -1624,18 +1876,20 @@ volumes:
 ## Task 17: 构建与验证
 
 ```bash
-mvn compile -pl zxf-springboot-file-upload
-mvn test -pl zxf-springboot-file-upload
+mvn compile
+mvn test          # 单元 + 切片测试（不含 *IT）
+mvn verify        # 含 EicarScanIT 端到端（需 Docker，无 Docker 自动跳过）
 docker compose -f docker/docker-compose.yml up -d clamav
-mvn spring-boot:run -pl zxf-springboot-file-upload
+mvn spring-boot:run
 
 # 手工冒烟
 curl -F "file=@clean.pdf" http://localhost:8080/api/files/upload
 echo 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > eicar.txt
 curl -F "file=@eicar.txt" http://localhost:8080/api/files/upload        # 期望 422
 curl -F "file=@big.pdf" -H "X-Scan-Async: true" http://localhost:8080/api/files/upload
-curl -N http://localhost:8080/api/files/scan/{scanId}/events            # SSE
+curl -N http://localhost:8080/api/files/scan/{scanId}/events            # SSE（含 15s 心跳）
 curl http://localhost:8080/api/files/scan/{scanId}                      # 轮询兜底
+curl http://localhost:8080/actuator/health                              # ClamAV PING 健康检查
 ```
 
 ---

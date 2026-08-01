@@ -25,7 +25,8 @@ public class YaraScanner {
 
     public YaraScanner(VirusScanProperties properties) {
         this.config = properties.getYara();
-        this.rulesPath = resolveRulesPath(config.getRulesPath());
+        // enabled=false 是完整逃生舱：不解析规则路径（规则文件缺失也能启动）
+        this.rulesPath = config.isEnabled() ? resolveRulesPath(config.getRulesPath()) : null;
     }
 
     /**

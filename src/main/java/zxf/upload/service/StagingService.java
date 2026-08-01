@@ -61,6 +61,12 @@ public class StagingService {
         try (InputStream in = file.getInputStream()) {
             Files.copy(in, stagingFile, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
+            // 落盘失败（磁盘满/IO 错误）时清理残留的不完整文件
+            try {
+                Files.deleteIfExists(stagingFile);
+            } catch (IOException cleanupError) {
+                log.warn("清理失败的暂存文件失败: {}", stagingFile, cleanupError);
+            }
             throw new FileRejectedException("文件暂存失败: " + e.getMessage());
         }
         log.debug("File staged: {} -> {}", original, stagingFile);

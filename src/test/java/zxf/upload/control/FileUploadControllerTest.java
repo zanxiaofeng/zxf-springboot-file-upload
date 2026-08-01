@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockMultipartFile;
@@ -23,19 +24,20 @@ import zxf.upload.service.StagingService;
 import zxf.upload.service.VirusScanService;
 import zxf.upload.support.rest.GlobalExceptionHandler;
 
+import java.io.IOException;
 import java.nio.file.Path;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -46,9 +48,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /**
  * Web 层测试：同步/异步上传状态码语义、SSE 与轮询端点、异常映射。
- * 异步时序与信号量背压见 {@link AsyncScanProcessorTests}。
+ * 异步时序与 SSE 心跳见 {@link AsyncScanProcessorTests}。
  */
 @WebMvcTest(FileUploadController.class)
+@EnableConfigurationProperties(VirusScanProperties.class)
 class FileUploadControllerTest {
 
     @Autowired
@@ -108,15 +111,74 @@ class FileUploadControllerTest {
     }
 
     @Test
-    void upload_syncScanError_returns502() throws Exception {
+    void upload_syncCleanFlagged_messageCarriesMarker() throws Exception {
+        // FLAG 策略放行的含宏文档：CLEAN 但 message 透传打标
+        Path staging = tempDir.resolve("staging.xlsx");
+        when(stagingService.stage(any())).thenReturn(staging);
+        when(scanService.scanFile(any(), anyString())).thenReturn(ScanResult.builder()
+                .status(ScanStatus.CLEAN)
+                .details("/data/upload-storage/x.xlsx")
+                .threat("macro-flagged: Office 文档包含 VBA 宏")
+                .build());
+
+        mvc.perform(multipart("/api/files/upload").file(uploadFile()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CLEAN"))
+                .andExpect(jsonPath("$.message").value("文件安全（macro-flagged: Office 文档包含 VBA 宏）"));
+    }
+
+    @Test
+    void upload_syncOverSyncThreshold_rejectedWithAsyncHint() throws Exception {
+        // 超过同步阈值（默认 20MB）：拒绝并提示走异步通道，不落盘
+        MockMultipartFile big = new MockMultipartFile(
+                "file", "big.zip", "application/zip", new byte[21 * 1024 * 1024]);
+
+        mvc.perform(multipart("/api/files/upload").file(big))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("FILE_REJECTED"))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("异步上传")));
+
+        verifyNoInteractions(stagingService);
+    }
+
+    @Test
+    void upload_asyncOverSyncThreshold_accepted() throws Exception {
+        // 同样大小走异步通道则放行
+        Path staging = tempDir.resolve("staging.zip");
+        when(stagingService.stage(any())).thenReturn(staging);
+        MockMultipartFile big = new MockMultipartFile(
+                "file", "big.zip", "application/zip", new byte[21 * 1024 * 1024]);
+
+        mvc.perform(multipart("/api/files/upload").file(big).header("X-Scan-Async", "true"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("SCANNING"));
+    }
+
+    @Test
+    void upload_syncScanError_returns502WithSanitizedMessage() throws Exception {
         Path staging = tempDir.resolve("staging.bin");
         when(stagingService.stage(any())).thenReturn(staging);
         when(scanService.scanFile(any(), anyString()))
-                .thenReturn(ScanResult.error(staging, "ClamAV 不可达"));
+                .thenReturn(ScanResult.error(staging, "ClamAV 扫描失败: connection refused localhost:3310"));
 
         mvc.perform(multipart("/api/files/upload").file(uploadFile()))
                 .andExpect(status().isBadGateway())
-                .andExpect(jsonPath("$.code").value("SCAN_ENGINE_ERROR"));
+                .andExpect(jsonPath("$.code").value("SCAN_ENGINE_ERROR"))
+                // 对外脱敏：不含引擎地址等内部细节
+                .andExpect(jsonPath("$.message").value("扫描引擎暂时不可用，请稍后重试"));
+    }
+
+    @Test
+    void upload_unexpectedError_returns500WithSanitizedMessage() throws Exception {
+        Path staging = tempDir.resolve("staging.bin");
+        when(stagingService.stage(any())).thenReturn(staging);
+        when(scanService.scanFile(any(), anyString()))
+                .thenThrow(new RuntimeException("unexpected internal detail"));
+
+        mvc.perform(multipart("/api/files/upload").file(uploadFile()))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"))
+                .andExpect(jsonPath("$.message").value("服务器内部错误"));
     }
 
     @Test
@@ -242,33 +304,31 @@ class FileUploadControllerTest {
         }
 
         @Test
-        void processScan_concurrentSubmissions_neverExceedPermits() throws Exception {
-            int permits = 4;
-            AsyncScanProcessor processor = newProcessor(permits);
-            AtomicInteger active = new AtomicInteger();
-            AtomicInteger maxActive = new AtomicInteger();
-            when(scanService.scanFile(any(), anyString())).thenAnswer(inv -> {
-                int current = active.incrementAndGet();
-                maxActive.accumulateAndGet(current, Math::max);
-                try {
-                    Thread.sleep(30);
-                } finally {
-                    active.decrementAndGet();
-                }
-                return ScanResult.clean(Path.of("staged"), "text/plain");
-            });
+        void sendHeartbeats_liveEmitter_receivesCommentFrame() throws Exception {
+            AsyncScanProcessor processor = newProcessor(4);
+            SseEmitter emitter = mock(SseEmitter.class);
+            processor.registerEmitter("sid", emitter);
 
-            ExecutorService pool = Executors.newFixedThreadPool(50);
-            for (int i = 0; i < 50; i++) {
-                int id = i;
-                pool.submit(() -> processor.processScan("scan-" + id, Path.of("f" + id), "f" + id + ".txt"));
-            }
-            pool.shutdown();
-            assertThat(pool.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
+            processor.sendHeartbeats();
 
-            assertThat(maxActive.get()).isLessThanOrEqualTo(permits);   // 信号量背压生效
-            assertThat(maxActive.get()).isGreaterThan(1);               // 且确实发生了并发
-            assertThat(processor.getResult("scan-0").getStatus()).isEqualTo(ScanStatus.CLEAN);
+            verify(emitter).send(any(SseEmitter.SseEventBuilder.class));
+        }
+
+        @Test
+        void sendHeartbeats_brokenEmitter_removedAndNoLongerNotified() throws Exception {
+            AsyncScanProcessor processor = newProcessor(4);
+            when(scanService.scanFile(any(), anyString()))
+                    .thenReturn(ScanResult.clean(Path.of("staged"), "text/plain"));
+            SseEmitter emitter = mock(SseEmitter.class);
+            doThrow(new IOException("broken pipe")).when(emitter).send(any(SseEmitter.SseEventBuilder.class));
+            processor.registerEmitter("sid", emitter);
+
+            processor.sendHeartbeats();                 // 心跳失败 → emitter 被移除
+            processor.processScan("sid", Path.of("staged"), "a.txt");
+
+            // 只有心跳那次失败的 send，扫描完成事件不再推送给已移除的 emitter
+            verify(emitter, times(1)).send(any(SseEmitter.SseEventBuilder.class));
+            verify(emitter, never()).complete();
         }
     }
 }

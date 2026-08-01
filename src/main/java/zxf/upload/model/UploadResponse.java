@@ -19,7 +19,8 @@ public class UploadResponse {
 
     public static UploadResponse of(String scanId, ScanResult result, String storedPath) {
         String message = switch (result.getStatus()) {
-            case CLEAN -> "文件安全";
+            // CLEAN 携带打标（macro-flagged / scan-engine-degraded）时透传给客户端
+            case CLEAN -> result.getThreat() == null ? "文件安全" : "文件安全（" + result.getThreat() + "）";
             case INFECTED -> "检测到威胁: " + result.getThreat();
             case REJECTED -> "文件被拒绝: " + result.getThreat();
             case ERROR -> "扫描失败: " + result.getDetails();

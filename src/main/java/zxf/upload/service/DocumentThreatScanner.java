@@ -37,9 +37,18 @@ public class DocumentThreatScanner {
     };
 
     /**
-     * @return null = 干净/非文档；非 null = 威胁描述
+     * 文档威胁检出。kind 供管道按策略分级处置：
+     * MACRO（VBA 宏）存在正常业务场景，可按 macro-policy 放行打标；
+     * ACTIVE_X / PDF_ACTION 几乎无正常场景，始终拦截。
      */
-    public String scan(Path file, String detectedMime) {
+    public record DocThreat(String description, Kind kind) {
+        public enum Kind { MACRO, ACTIVE_X, PDF_ACTION }
+    }
+
+    /**
+     * @return null = 干净/非文档；非 null = 威胁检出
+     */
+    public DocThreat scan(Path file, String detectedMime) {
         String filename = file.getFileName().toString().toLowerCase(Locale.ROOT);
         try {
             if (filename.endsWith(".docx") || filename.endsWith(".xlsx") || filename.endsWith(".pptx")) {
@@ -59,7 +68,7 @@ public class DocumentThreatScanner {
         }
     }
 
-    private String scanOoxml(Path file) throws IOException {
+    private DocThreat scanOoxml(Path file) throws IOException {
         try (ZipFile zip = new ZipFile(file.toFile())) {
             boolean hasVba = false;
             boolean hasActiveX = false;
@@ -76,17 +85,17 @@ public class DocumentThreatScanner {
             }
             if (hasVba) {
                 log.warn("OOXML contains VBA project: {}", file.getFileName());
-                return "Office 文档包含 VBA 宏";
+                return new DocThreat("Office 文档包含 VBA 宏", DocThreat.Kind.MACRO);
             }
             if (hasActiveX) {
                 log.warn("OOXML contains ActiveX controls: {}", file.getFileName());
-                return "Office 文档包含 ActiveX 控件";
+                return new DocThreat("Office 文档包含 ActiveX 控件", DocThreat.Kind.ACTIVE_X);
             }
             return null;
         }
     }
 
-    private String scanOle2(Path file) throws IOException {
+    private DocThreat scanOle2(Path file) throws IOException {
         try (VBAMacroReader reader = new VBAMacroReader(file.toFile())) {
             Map<String, String> macros = reader.readMacros();
             if (macros.isEmpty()) {
@@ -98,7 +107,7 @@ public class DocumentThreatScanner {
             for (String token : SUSPICIOUS_MACRO_TOKENS) {
                 if (code.contains(token)) {
                     log.warn("OLE2 contains suspicious macro token '{}' in {}", token, file.getFileName());
-                    return "OLE2 文档包含可疑 VBA 宏（命中: " + token + "）";
+                    return new DocThreat("OLE2 文档包含可疑 VBA 宏（命中: " + token + "）", DocThreat.Kind.MACRO);
                 }
             }
             log.info("OLE2 contains benign macros: {}", file.getFileName());
@@ -109,7 +118,7 @@ public class DocumentThreatScanner {
         }
     }
 
-    private String scanPdf(Path file) throws IOException {
+    private DocThreat scanPdf(Path file) throws IOException {
         boolean hasJavaScript = false;
         boolean hasOpenAction = false;
         int headLen = 0;   // chunk 首部保留的上一块重叠字节数（首块为 0，数据从 chunk[0] 起连续排布）
@@ -124,11 +133,11 @@ public class DocumentThreatScanner {
                 if (text.contains("/openaction")) hasOpenAction = true;
                 if (text.contains("/launch")) {
                     log.warn("PDF contains /Launch action: {}", file.getFileName());
-                    return "PDF 包含 Launch 动作（可能执行外部程序）";
+                    return new DocThreat("PDF 包含 Launch 动作（可能执行外部程序）", DocThreat.Kind.PDF_ACTION);
                 }
                 if (hasJavaScript && hasOpenAction) {
                     log.warn("PDF contains JavaScript with OpenAction: {}", file.getFileName());
-                    return "PDF 包含自动执行的 JavaScript";
+                    return new DocThreat("PDF 包含自动执行的 JavaScript", DocThreat.Kind.PDF_ACTION);
                 }
                 // 末尾重叠字节移回首部防止关键字跨块漏检；末块不足 OVERLAP 时按实际长度
                 headLen = Math.min(len, OVERLAP);

@@ -98,10 +98,12 @@ public class FileTypeValidator {
     }
 
     /**
-     * 流式 ZIP 检查：
-     * - getSize() 返回 -1 时按实际读取字节计数；
+     * 流式 ZIP 检查（OWASP 解压炸弹防护五维度）：
+     * - 条目总数上限（海量空 entry 炸弹，遍历本身即 DoS 向量）；
+     * - 单 entry 解压大小上限；
+     * - getSize() 返回 -1 时按实际读取字节计数（边读边校验，超限即中断）；
      * - 累计解压总量绝对上限；
-     * - 嵌套压缩包深度限制（递归炸弹）。
+     * - 压缩比上限 + 嵌套压缩包深度限制（递归炸弹）。
      *
      * @return null = 通过；非 null = 拒绝原因
      */
@@ -118,19 +120,34 @@ public class FileTypeValidator {
         }
 
         long totalUncompressed = 0;
+        long entryCount = 0;
         try (InputStream in = Files.newInputStream(file);
              ZipArchiveInputStream archive = new ZipArchiveInputStream(in)) {
             ZipArchiveEntry entry;
             byte[] buffer = new byte[8192];
             while ((entry = archive.getNextZipEntry()) != null) {
+                if (++entryCount > guard.getMaxEntries()) {
+                    return "疑似 ZIP 炸弹，条目数超过 " + guard.getMaxEntries();
+                }
                 long entrySize = entry.getSize();
                 if (entrySize >= 0) {
+                    if (entrySize > guard.getMaxEntryUncompressed()) {
+                        return singleEntryBombMessage(guard);
+                    }
                     totalUncompressed += entrySize;
                 } else {
-                    // 未知大小：实际读取计数
+                    // 未知大小：实际读取计数，单 entry 与累计超限均即时中断
+                    long entryBytes = 0;
                     int n;
                     while ((n = archive.read(buffer)) != -1) {
+                        entryBytes += n;
+                        if (entryBytes > guard.getMaxEntryUncompressed()) {
+                            return singleEntryBombMessage(guard);
+                        }
                         totalUncompressed += n;
+                        if (totalUncompressed > guard.getMaxTotalUncompressed()) {
+                            return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
+                        }
                     }
                 }
                 if (totalUncompressed > guard.getMaxTotalUncompressed()) {
@@ -150,6 +167,10 @@ public class FileTypeValidator {
             throw new ScanFailedException("ZIP 检查失败: " + e.getMessage(), e);
         }
         return null;
+    }
+
+    private String singleEntryBombMessage(VirusScanProperties.ZipGuard guard) {
+        return "疑似 ZIP 炸弹，单文件解压大小超过 " + (guard.getMaxEntryUncompressed() >> 20) + "MB";
     }
 
     private String extractExtension(String filename) {

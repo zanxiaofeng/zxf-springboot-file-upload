@@ -107,4 +107,55 @@ class FileTypeValidatorTest {
 
         assertThat(result.passed()).isTrue();
     }
+
+    @Test
+    void validate_tooManyEntries_rejectedAsZipBomb() throws Exception {
+        // 海量空 entry 炸弹：字节量正常，但遍历条目本身即 DoS 向量
+        VirusScanProperties properties = new VirusScanProperties();
+        properties.getZip().setMaxEntries(100);
+        FileTypeValidator strictValidator = new FileTypeValidator(properties);
+
+        Path zip = tempDir.resolve("many-entries.zip");
+        try (OutputStream out = Files.newOutputStream(zip);
+             ZipOutputStream zos = new ZipOutputStream(out)) {
+            for (int i = 0; i < 101; i++) {
+                zos.putNextEntry(new ZipEntry("e" + i + ".txt"));
+                zos.closeEntry();
+            }
+        }
+
+        FileTypeValidator.TypeCheck result = strictValidator.validate(zip, "many-entries.zip");
+
+        assertThat(result.passed()).isFalse();
+        assertThat(result.rejectReason()).contains("条目数超过");
+    }
+
+    @Test
+    void validate_singleEntryExceedsLimit_rejectedAsZipBomb() throws Exception {
+        // 单 entry 解压超限（总量未超限时也应拒绝）
+        VirusScanProperties properties = new VirusScanProperties();
+        properties.getZip().setMaxEntryUncompressed(1 << 20);   // 1MB
+        properties.getZip().setMaxCompressionRatio(100_000L);   // 放开压缩比，隔离变量
+        FileTypeValidator strictValidator = new FileTypeValidator(properties);
+
+        StringBuilder sb = new StringBuilder();
+        while (sb.length() < 2 * 1024 * 1024) {
+            sb.append(UUID.randomUUID());
+        }
+        byte[] payload = sb.toString().getBytes(StandardCharsets.UTF_8);
+
+        Path zip = tempDir.resolve("big-entry.zip");
+        try (OutputStream out = Files.newOutputStream(zip);
+             ZipArchiveOutputStream zaos = new ZipArchiveOutputStream(out)) {
+            ZipArchiveEntry entry = new ZipArchiveEntry("big.txt");   // 未知大小 → 实际读取分支
+            zaos.putArchiveEntry(entry);
+            zaos.write(payload);
+            zaos.closeArchiveEntry();
+        }
+
+        FileTypeValidator.TypeCheck result = strictValidator.validate(zip, "big-entry.zip");
+
+        assertThat(result.passed()).isFalse();
+        assertThat(result.rejectReason()).contains("单文件解压大小超过");
+    }
 }

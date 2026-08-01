@@ -10,6 +10,7 @@ import zxf.upload.model.exception.ScanFailedException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.Semaphore;
 
 /**
  * 扫描管道。输入为 staging 文件 Path，拥有该文件的完整生命周期：
@@ -17,6 +18,9 @@ import java.nio.file.Path;
  * - INFECTED：移入隔离区；
  * - REJECTED/ERROR：删除 staging 文件。
  * 调用方只拿结果，不接触临时文件。
+ *
+ * 并发闸门：信号量在管道入口统一 acquire，同步（Web 虚拟线程）与异步
+ * 调用共用同一背压，防止并发上传打爆 ClamAV/YARA 引擎。
  */
 @Slf4j
 @Service
@@ -27,6 +31,7 @@ public class VirusScanService {
     private final YaraScanner yaraScanner;
     private final DocumentThreatScanner documentThreatScanner;
     private final FileStorageService storageService;
+    private final Semaphore scanPermits;
 
     public VirusScanService(VirusScanProperties properties,
                             FileTypeValidator fileTypeValidator,
@@ -40,6 +45,7 @@ public class VirusScanService {
         this.yaraScanner = yaraScanner;
         this.documentThreatScanner = documentThreatScanner;
         this.storageService = storageService;
+        this.scanPermits = new Semaphore(properties.getMaxConcurrentScans());
     }
 
     /**
@@ -47,6 +53,20 @@ public class VirusScanService {
      * @return CLEAN 时 details 为正式存储路径；其余状态 staging 文件已被妥善处理
      */
     public ScanResult scanFile(Path stagingFile, String originalFilename) {
+        try {
+            scanPermits.acquire();   // 背压闸门：许可耗尽时（虚拟线程）挂起等待，成本极低
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ScanFailedException("扫描排队被中断", e);
+        }
+        try {
+            return doScanWithCleanup(stagingFile, originalFilename);
+        } finally {
+            scanPermits.release();
+        }
+    }
+
+    private ScanResult doScanWithCleanup(Path stagingFile, String originalFilename) {
         try {
             ScanResult result = doScan(stagingFile, originalFilename);
             switch (result.getStatus()) {
@@ -58,6 +78,7 @@ public class VirusScanService {
                             .status(ScanStatus.CLEAN)
                             .detectedMime(result.getDetectedMime())
                             .details(stored)
+                            .threat(result.getThreat())   // 保留打标（macro-flagged / scan-engine-degraded）
                             .build();
                 }
                 case INFECTED -> {
@@ -121,9 +142,20 @@ public class VirusScanService {
 
         // 阶段 4：文档威胁（复用 mime，不重复探测）
         if (fileTypeValidator.isDocumentFormat(mime)) {
-            String docThreat = documentThreatScanner.scan(stagingFile, mime);
+            DocumentThreatScanner.DocThreat docThreat = documentThreatScanner.scan(stagingFile, mime);
             if (docThreat != null) {
-                return ScanResult.infected(stagingFile, docThreat);
+                // 宏策略分级：FLAG 放行并打标告警；ActiveX/PDF 危险动作始终拦截
+                if (docThreat.kind() == DocumentThreatScanner.DocThreat.Kind.MACRO
+                        && properties.getMacroPolicy() == VirusScanProperties.MacroPolicy.FLAG) {
+                    log.warn("含宏文档按 FLAG 策略放行: {} - {}", originalFilename, docThreat.description());
+                    return ScanResult.builder()
+                            .status(ScanStatus.CLEAN)
+                            .stagingPath(stagingFile)
+                            .detectedMime(mime)
+                            .threat("macro-flagged: " + docThreat.description())
+                            .build();
+                }
+                return ScanResult.infected(stagingFile, docThreat.description());
             }
         }
 
