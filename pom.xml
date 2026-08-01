@@ -29,11 +29,11 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
-        <!-- ClamAV 客户端（INSTREAM 协议） -->
+        <!-- ClamAV 客户端（INSTREAM 协议）。Central 最新 release 为 2.1.2（方案中 2.1.3 不存在） -->
         <dependency>
             <groupId>xyz.capybara</groupId>
             <artifactId>clamav-client</artifactId>
-            <version>2.1.3</version>
+            <version>2.1.2</version>
         </dependency>
 
         <!-- Apache Tika 文件类型检测 -->
@@ -65,6 +65,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Boot 4 测试模块按技术拆分：@WebMvcTest 位于此模块，starter-test 不传递 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-webmvc-test</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

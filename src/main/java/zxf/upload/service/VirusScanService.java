@@ -71,12 +71,13 @@ public class VirusScanService {
                 }
             }
         } catch (ScanFailedException e) {
-            deleteQuietly(stagingFile);
             // fail 策略统一收口：CLOSED 上抛（转 502）；OPEN 降级放行并打标
             if (properties.getFailStrategy() == VirusScanProperties.FailStrategy.OPEN) {
                 log.error("Scan engine failed, fail-open policy applied: {}", e.getMessage(), e);
                 try {
+                    // 先入库再清理：若先 delete，store 将读不到文件
                     String stored = storageService.store(stagingFile, originalFilename);
+                    deleteQuietly(stagingFile);
                     return ScanResult.builder()
                             .status(ScanStatus.CLEAN)
                             .details(stored)
@@ -86,6 +87,7 @@ public class VirusScanService {
                     throw new ScanFailedException("fail-open 降级存储失败", ioe);
                 }
             }
+            deleteQuietly(stagingFile);
             throw e;
         } catch (IOException e) {
             deleteQuietly(stagingFile);

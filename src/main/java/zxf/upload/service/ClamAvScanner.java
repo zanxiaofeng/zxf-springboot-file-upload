@@ -3,6 +3,7 @@ package zxf.upload.service;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import xyz.capybara.clamav.ClamavClient;
+import xyz.capybara.clamav.Platform;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.ScanFailedException;
 
@@ -24,7 +25,8 @@ public class ClamAvScanner {
 
     public ClamAvScanner(VirusScanProperties properties) {
         VirusScanProperties.ClamAv cfg = properties.getClamav();
-        this.client = new ClamavClient(cfg.getHost(), cfg.getPort(), cfg.getTimeout());
+        // capybara 2.1.2 构造器不支持 socket timeout 配置（ClamAV 挂起时依赖 TCP 层超时兜底）
+        this.client = new ClamavClient(cfg.getHost(), cfg.getPort(), Platform.JVM_PLATFORM);
     }
 
     /**

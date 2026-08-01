@@ -71,8 +71,6 @@ public class VirusScanProperties {
         @NotBlank
         private String host = "localhost";
         private int port = 3310;
-        /** socket 超时 ms */
-        private int timeout = 30000;
     }
 
     @Data

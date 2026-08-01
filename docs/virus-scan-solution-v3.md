@@ -6,7 +6,7 @@
 
 **Architecture:** `上传 → 预检（大小/扩展名，未落盘）→ 暂存落盘 → 扫描管道（Tika 类型校验 → ClamAV → YARA → 文档威胁检测）→ 入库 / 隔离 / 清理`。暂存文件生命周期完全由扫描管道内部管理，调用方不接触临时文件。
 
-**Tech Stack:** Spring Boot 4.1, Java 21（Virtual Threads）, ClamAV (xyz.capybara:clamav-client 2.1.3), YARA CLI (ProcessBuilder), Apache Tika 2.9.x, commons-compress 1.27+, Apache POI 5.3+, Lombok
+**Tech Stack:** Spring Boot 4.1, Java 21（Virtual Threads）, ClamAV (xyz.capybara:clamav-client 2.1.2), YARA CLI (ProcessBuilder), Apache Tika 2.9.x, commons-compress 1.27+, Apache POI 5.3+, Lombok
 
 ---
 
@@ -88,7 +88,7 @@ zxf-springboot-file-upload/
     <dependency>
         <groupId>xyz.capybara</groupId>
         <artifactId>clamav-client</artifactId>
-        <version>2.1.3</version>
+        <version>2.1.2</version>
     </dependency>
 
     <!-- Apache Tika 文件类型检测 -->
@@ -382,8 +382,6 @@ public class VirusScanProperties {
         @NotBlank
         private String host = "localhost";
         private int port = 3310;
-        /** socket 超时 ms */
-        private int timeout = 30000;
     }
 
     @Data
@@ -519,6 +517,7 @@ package zxf.upload.service;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import xyz.capybara.clamav.ClamavClient;
+import xyz.capybara.clamav.Platform;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.ScanFailedException;
 
@@ -540,7 +539,8 @@ public class ClamAvScanner {
 
     public ClamAvScanner(VirusScanProperties properties) {
         VirusScanProperties.ClamAv cfg = properties.getClamav();
-        this.client = new ClamavClient(cfg.getHost(), cfg.getPort(), cfg.getTimeout());
+        // capybara 2.1.2 构造器不支持 socket timeout 配置（ClamAV 挂起时依赖 TCP 层超时兜底）
+        this.client = new ClamavClient(cfg.getHost(), cfg.getPort(), Platform.JVM_PLATFORM);
     }
 
     /**
@@ -973,13 +973,12 @@ public class DocumentThreatScanner {
     private String scanPdf(Path file) throws IOException {
         boolean hasJavaScript = false;
         boolean hasOpenAction = false;
-        byte[] tail = new byte[0];
+        int headLen = 0;   // chunk 首部保留的上一块重叠字节数（首块为 0，数据从 chunk[0] 起连续排布）
         try (InputStream in = Files.newInputStream(file)) {
             byte[] chunk = new byte[CHUNK];
             int n;
-            while ((n = in.read(chunk, OVERLAP, CHUNK - OVERLAP)) != -1) {
-                System.arraycopy(tail, 0, chunk, 0, tail.length);
-                int len = tail.length + n;
+            while ((n = in.read(chunk, headLen, CHUNK - headLen)) != -1) {
+                int len = headLen + n;
                 String text = new String(chunk, 0, len, StandardCharsets.ISO_8859_1)
                         .toLowerCase(Locale.ROOT);
                 if (text.contains("/javascript")) hasJavaScript = true;
@@ -992,8 +991,9 @@ public class DocumentThreatScanner {
                     log.warn("PDF contains JavaScript with OpenAction: {}", file.getFileName());
                     return "PDF 包含自动执行的 JavaScript";
                 }
-                tail = new byte[OVERLAP];
-                System.arraycopy(chunk, len - OVERLAP, tail, 0, OVERLAP);
+                // 末尾重叠字节移回首部防止关键字跨块漏检；末块不足 OVERLAP 时按实际长度
+                headLen = Math.min(len, OVERLAP);
+                System.arraycopy(chunk, len - headLen, chunk, 0, headLen);
             }
         }
         return null;
@@ -1079,12 +1079,13 @@ public class VirusScanService {
                 }
             }
         } catch (ScanFailedException e) {
-            deleteQuietly(stagingFile);
             // fail 策略统一收口：CLOSED 上抛（转 502）；OPEN 降级放行并打标
             if (properties.getFailStrategy() == VirusScanProperties.FailStrategy.OPEN) {
                 log.error("Scan engine failed, fail-open policy applied: {}", e.getMessage(), e);
                 try {
+                    // 先入库再清理：若先 delete，store 将读不到文件
                     String stored = storageService.store(stagingFile, originalFilename);
+                    deleteQuietly(stagingFile);
                     return ScanResult.builder()
                             .status(ScanStatus.CLEAN)
                             .details(stored)
@@ -1094,6 +1095,7 @@ public class VirusScanService {
                     throw new ScanFailedException("fail-open 降级存储失败", ioe);
                 }
             }
+            deleteQuietly(stagingFile);
             throw e;
         } catch (IOException e) {
             deleteQuietly(stagingFile);
@@ -1538,7 +1540,6 @@ zxf:
     clamav:
       host: ${CLAMAV_HOST:localhost}
       port: ${CLAMAV_PORT:3310}
-      timeout: 30000
     yara:
       enabled: true
       binary-path: ${YARA_BINARY:yara}

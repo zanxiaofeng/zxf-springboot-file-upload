@@ -112,13 +112,12 @@ public class DocumentThreatScanner {
     private String scanPdf(Path file) throws IOException {
         boolean hasJavaScript = false;
         boolean hasOpenAction = false;
-        byte[] tail = new byte[0];
+        int headLen = 0;   // chunk 首部保留的上一块重叠字节数（首块为 0，数据从 chunk[0] 起连续排布）
         try (InputStream in = Files.newInputStream(file)) {
             byte[] chunk = new byte[CHUNK];
             int n;
-            while ((n = in.read(chunk, OVERLAP, CHUNK - OVERLAP)) != -1) {
-                System.arraycopy(tail, 0, chunk, 0, tail.length);
-                int len = tail.length + n;
+            while ((n = in.read(chunk, headLen, CHUNK - headLen)) != -1) {
+                int len = headLen + n;
                 String text = new String(chunk, 0, len, StandardCharsets.ISO_8859_1)
                         .toLowerCase(Locale.ROOT);
                 if (text.contains("/javascript")) hasJavaScript = true;
@@ -131,8 +130,9 @@ public class DocumentThreatScanner {
                     log.warn("PDF contains JavaScript with OpenAction: {}", file.getFileName());
                     return "PDF 包含自动执行的 JavaScript";
                 }
-                tail = new byte[OVERLAP];
-                System.arraycopy(chunk, len - OVERLAP, tail, 0, OVERLAP);
+                // 末尾重叠字节移回首部防止关键字跨块漏检；末块不足 OVERLAP 时按实际长度
+                headLen = Math.min(len, OVERLAP);
+                System.arraycopy(chunk, len - headLen, chunk, 0, headLen);
             }
         }
         return null;

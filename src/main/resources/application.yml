@@ -20,7 +20,6 @@ zxf:
     clamav:
       host: ${CLAMAV_HOST:localhost}
       port: ${CLAMAV_PORT:3310}
-      timeout: 30000
     yara:
       enabled: true
       binary-path: ${YARA_BINARY:yara}
