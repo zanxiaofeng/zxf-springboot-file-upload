@@ -65,11 +65,12 @@ public class AsyncScanProcessor {
      */
     @Scheduled(fixedRateString = "${zxf.virus-scan.sse-heartbeat-seconds:15}", timeUnit = TimeUnit.SECONDS)
     public void sendHeartbeats() {
-        pendingEmitters.asMap().forEach((scanId, emitter) -> {
+        var emitters = pendingEmitters.asMap();
+        emitters.forEach((scanId, emitter) -> {
             try {
                 emitter.send(SseEmitter.event().comment("hb"));
             } catch (Exception e) {
-                pendingEmitters.asMap().remove(scanId);
+                emitters.remove(scanId);
                 log.debug("SSE 心跳发送失败，移除 emitter: {}", scanId);
             }
         });
@@ -88,9 +89,9 @@ public class AsyncScanProcessor {
             return;
         }
         pendingEmitters.put(scanId, emitter);
-        emitter.onCompletion(() -> pendingEmitters.asMap().remove(scanId));
+        emitter.onCompletion(() -> removeEmitter(scanId));
         emitter.onTimeout(() -> {
-            pendingEmitters.asMap().remove(scanId);
+            removeEmitter(scanId);
             log.warn("SSE emitter 超时: {}", scanId);
         });
     }
@@ -104,11 +105,12 @@ public class AsyncScanProcessor {
             response = UploadResponse.of(scanId, result, storedPath);
         } catch (Exception e) {
             log.error("异步扫描失败: scanId={}", scanId, e);
-            response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描失败: " + e.getMessage(), null);
+            // 对外脱敏：内部异常详情只进日志，不泄漏给客户端（与 GlobalExceptionHandler 同一原则）
+            response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描失败，请稍后重试", null);
         }
 
         completedScans.put(scanId, response);
-        SseEmitter emitter = pendingEmitters.asMap().remove(scanId);
+        SseEmitter emitter = removeEmitter(scanId);
         if (emitter != null) {
             try {
                 emitter.send(SseEmitter.event().name(eventName(response.getStatus())).data(response));
@@ -125,5 +127,10 @@ public class AsyncScanProcessor {
             case INFECTED, REJECTED -> "threat";
             default -> "error";
         };
+    }
+
+    /** 从等待缓存移除 emitter，返回移除的实例（可能为 null） */
+    private SseEmitter removeEmitter(String scanId) {
+        return pendingEmitters.asMap().remove(scanId);
     }
 }

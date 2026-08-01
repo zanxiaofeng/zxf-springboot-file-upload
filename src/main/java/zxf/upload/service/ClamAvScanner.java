@@ -68,9 +68,17 @@ public class ClamAvScanner {
         }
     }
 
-    /** Actuator 健康检查使用（PING/PONG） */
+    /** Actuator 健康检查使用（PING/PONG），同样受熔断器保护防止挂起 */
     public void ping() {
-        client.ping();
+        try {
+            circuitBreaker.executeSupplier(() -> {
+                client.ping();
+                return null;
+            });
+        } catch (CallNotPermittedException e) {
+            // 熔断中：健康检查标记为不可用，不再触碰引擎
+            throw new ScanFailedException("ClamAV 熔断中", e);
+        }
     }
 
     private String doScan(Path file) {

@@ -12,6 +12,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Semaphore;
 
+import zxf.upload.service.DocumentThreatScanner.DocThreat;
+
 /**
  * 扫描管道。输入为 staging 文件 Path，拥有该文件的完整生命周期：
  * - CLEAN：移交 FileStorageService 入库，删除 staging 文件；
@@ -142,10 +144,10 @@ public class VirusScanService {
 
         // 阶段 4：文档威胁（复用 mime，不重复探测）
         if (fileTypeValidator.isDocumentFormat(mime)) {
-            DocumentThreatScanner.DocThreat docThreat = documentThreatScanner.scan(stagingFile, mime);
+            DocThreat docThreat = documentThreatScanner.scan(stagingFile, mime);
             if (docThreat != null) {
                 // 宏策略分级：FLAG 放行并打标告警；ActiveX/PDF 危险动作始终拦截
-                if (docThreat.kind() == DocumentThreatScanner.DocThreat.Kind.MACRO
+                if (docThreat.kind() == DocThreat.Kind.MACRO
                         && properties.getMacroPolicy() == VirusScanProperties.MacroPolicy.FLAG) {
                     log.warn("含宏文档按 FLAG 策略放行: {} - {}", originalFilename, docThreat.description());
                     return ScanResult.builder()

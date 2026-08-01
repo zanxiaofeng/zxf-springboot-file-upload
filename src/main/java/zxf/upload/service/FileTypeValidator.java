@@ -146,12 +146,12 @@ public class FileTypeValidator {
                         }
                         totalUncompressed += n;
                         if (totalUncompressed > guard.getMaxTotalUncompressed()) {
-                            return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
+                            return totalSizeBombMessage(guard);
                         }
                     }
                 }
                 if (totalUncompressed > guard.getMaxTotalUncompressed()) {
-                    return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
+                    return totalSizeBombMessage(guard);
                 }
                 if (compressedSize > 0 && totalUncompressed > compressedSize * guard.getMaxCompressionRatio()) {
                     return "疑似 ZIP 炸弹，压缩比超过 " + guard.getMaxCompressionRatio() + ":1";
@@ -170,7 +170,11 @@ public class FileTypeValidator {
     }
 
     private String singleEntryBombMessage(VirusScanProperties.ZipGuard guard) {
-        return "疑似 ZIP 炸弹，单文件解压大小超过 " + (guard.getMaxEntryUncompressed() >> 20) + "MB";
+        return "疑似 ZIP 炸弹，单文件解压大小超过 " + guard.getMaxEntryUncompressed() / 1024 / 1024 + "MB";
+    }
+
+    private String totalSizeBombMessage(VirusScanProperties.ZipGuard guard) {
+        return "疑似 ZIP 炸弹，累计解压大小超过 " + guard.getMaxTotalUncompressed() / 1024 / 1024 + "MB";
     }
 
     private String extractExtension(String filename) {
