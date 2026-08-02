@@ -2,6 +2,7 @@ package zxf.upload.service;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.util.Assert;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.ScanFailedException;
 
@@ -30,10 +31,14 @@ public class YaraScanner {
     }
 
     /**
+     * 扫描文件。
+     *
+     * @param file 待扫描文件，必须非空
      * @return null = 干净/未启用；非 null = 命中签名描述
      * @throws ScanFailedException yara 进程执行错误（由管道按 fail 策略处理）
      */
     public String scan(Path file) {
+        Assert.notNull(file, "file must not be null");
         if (!config.isEnabled()) {
             return null;
         }

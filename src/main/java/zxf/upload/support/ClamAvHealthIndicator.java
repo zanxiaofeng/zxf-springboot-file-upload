@@ -17,6 +17,11 @@ public class ClamAvHealthIndicator implements HealthIndicator {
         this.clamAvScanner = clamAvScanner;
     }
 
+    /**
+     * 检查 ClamAV 是否可达。
+     *
+     * @return UP 表示 PING 成功；DOWN 包含异常原因
+     */
     @Override
     public Health health() {
         try {

@@ -3,6 +3,7 @@ package zxf.upload.service;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.poifs.macros.VBAMacroReader;
 import org.springframework.stereotype.Component;
+import org.springframework.util.Assert;
 import zxf.upload.model.exception.ScanFailedException;
 
 import java.io.IOException;
@@ -10,6 +11,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.zip.ZipEntry;
@@ -31,24 +33,31 @@ public class DocumentThreatScanner {
     private static final int CHUNK = 1 << 20;
     private static final int OVERLAP = 64;
 
-    private static final String[] SUSPICIOUS_MACRO_TOKENS = {
+    private static final List<String> SUSPICIOUS_MACRO_TOKENS = List.of(
             "autoopen", "autoexec", "document_open", "workbook_open",
-            "shell", "wscript.shell", "cmd.exe", "powershell", "urldownloadtofile", "createobject"
-    };
+            "shell", "wscript.shell", "cmd.exe", "powershell", "urldownloadtofile", "createobject");
 
     /**
      * 文档威胁检出。kind 供管道按策略分级处置：
      * MACRO（VBA 宏）存在正常业务场景，可按 macro-policy 放行打标；
      * ACTIVE_X / PDF_ACTION 几乎无正常场景，始终拦截。
+     *
+     * @param description 威胁描述
+     * @param kind        威胁类型
      */
     public record DocThreat(String description, Kind kind) {
         public enum Kind { MACRO, ACTIVE_X, PDF_ACTION }
     }
 
     /**
+     * 扫描文档威胁。
+     *
+     * @param file         待扫描文件，必须非空
+     * @param detectedMime 探测到的 MIME 类型
      * @return null = 干净/非文档；非 null = 威胁检出
      */
     public DocThreat scan(Path file, String detectedMime) {
+        Assert.notNull(file, "file must not be null");
         String filename = file.getFileName().toString().toLowerCase(Locale.ROOT);
         try {
             if (filename.endsWith(".docx") || filename.endsWith(".xlsx") || filename.endsWith(".pptx")) {
@@ -61,8 +70,6 @@ public class DocumentThreatScanner {
                 return scanPdf(file);
             }
             return null;
-        } catch (ScanFailedException e) {
-            throw e;
         } catch (Exception e) {
             throw new ScanFailedException("文档威胁检测失败: " + e.getMessage(), e);
         }

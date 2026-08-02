@@ -289,7 +289,7 @@ class FileUploadControllerTest {
         void getResult_unknownOrPendingScanId_returnsScanning() {
             AsyncScanProcessor processor = newProcessor(4);
 
-            assertThat(processor.getResult("nope").getStatus()).isEqualTo(ScanStatus.SCANNING);
+            assertThat(processor.getResult("nope").status()).isEqualTo(ScanStatus.SCANNING);
         }
 
         @Test
@@ -300,7 +300,7 @@ class FileUploadControllerTest {
 
             processor.processScan("sid", Path.of("staged"), "a.txt");
 
-            assertThat(processor.getResult("sid").getStatus()).isEqualTo(ScanStatus.ERROR);
+            assertThat(processor.getResult("sid").status()).isEqualTo(ScanStatus.ERROR);
         }
 
         @Test
