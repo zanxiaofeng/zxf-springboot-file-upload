@@ -6,7 +6,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.util.Assert;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.ScanResult;
@@ -54,14 +53,8 @@ public class AsyncScanProcessor {
                 .build();
     }
 
-    /**
-     * 轮询兜底端点使用。
-     *
-     * @param scanId 扫描 ID，必须非空
-     * @return 已完成响应或 SCANNING 占位响应
-     */
+    /** 轮询兜底端点使用 */
     public UploadResponse getResult(String scanId) {
-        Assert.hasText(scanId, "scanId must not be blank");
         UploadResponse done = completedScans.getIfPresent(scanId);
         return done != null ? done : UploadResponse.scanning(scanId);
     }
@@ -72,31 +65,22 @@ public class AsyncScanProcessor {
      */
     @Scheduled(fixedRateString = "${zxf.virus-scan.sse-heartbeat-seconds:15}", timeUnit = TimeUnit.SECONDS)
     public void sendHeartbeats() {
-        var emitters = pendingEmitters.asMap();
-        emitters.forEach((scanId, emitter) -> {
+        pendingEmitters.asMap().forEach((scanId, emitter) -> {
             try {
                 emitter.send(SseEmitter.event().comment("hb"));
             } catch (Exception e) {
-                emitters.remove(scanId);
+                pendingEmitters.asMap().remove(scanId);
                 log.debug("SSE 心跳发送失败，移除 emitter: {}", scanId);
             }
         });
     }
 
-    /**
-     * 注册 SSE emitter。若扫描结果已存在则立即回放。
-     *
-     * @param scanId 扫描 ID，必须非空
-     * @param emitter SSE emitter，必须非空
-     */
     public void registerEmitter(String scanId, SseEmitter emitter) {
-        Assert.hasText(scanId, "scanId must not be blank");
-        Assert.notNull(emitter, "emitter must not be null");
         // 先查结果缓存：扫描可能已先于 SSE 连接完成
         UploadResponse done = completedScans.getIfPresent(scanId);
         if (done != null) {
             try {
-                emitter.send(SseEmitter.event().name(eventName(done.status())).data(done));
+                emitter.send(SseEmitter.event().name(eventName(done.getStatus())).data(done));
                 emitter.complete();
             } catch (IOException e) {
                 log.warn("SSE 回放失败: {}", scanId, e);
@@ -104,24 +88,15 @@ public class AsyncScanProcessor {
             return;
         }
         pendingEmitters.put(scanId, emitter);
-        emitter.onCompletion(() -> removeEmitter(scanId));
+        emitter.onCompletion(() -> pendingEmitters.asMap().remove(scanId));
         emitter.onTimeout(() -> {
-            removeEmitter(scanId);
+            pendingEmitters.asMap().remove(scanId);
             log.warn("SSE emitter 超时: {}", scanId);
         });
     }
 
-    /**
-     * 异步执行扫描管道并推送结果。
-     *
-     * @param scanId      扫描 ID，必须非空
-     * @param stagingFile 暂存文件路径，必须非空
-     * @param filename    原始文件名
-     */
     @Async   // 使用 Boot 装配的虚拟线程执行器（spring.threads.virtual.enabled=true）
     public void processScan(String scanId, Path stagingFile, String filename) {
-        Assert.hasText(scanId, "scanId must not be blank");
-        Assert.notNull(stagingFile, "stagingFile must not be null");
         UploadResponse response;
         try {
             ScanResult result = scanService.scanFile(stagingFile, filename);
@@ -129,15 +104,14 @@ public class AsyncScanProcessor {
             response = UploadResponse.of(scanId, result, storedPath);
         } catch (Exception e) {
             log.error("异步扫描失败: scanId={}", scanId, e);
-            // 对外脱敏：内部异常详情只进日志，不泄漏给客户端（与 GlobalExceptionHandler 同一原则）
-            response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描失败，请稍后重试", null);
+            response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描失败: " + e.getMessage(), null);
         }
 
         completedScans.put(scanId, response);
-        SseEmitter emitter = removeEmitter(scanId);
+        SseEmitter emitter = pendingEmitters.asMap().remove(scanId);
         if (emitter != null) {
             try {
-                emitter.send(SseEmitter.event().name(eventName(response.status())).data(response));
+                emitter.send(SseEmitter.event().name(eventName(response.getStatus())).data(response));
                 emitter.complete();
             } catch (IOException e) {
                 log.warn("SSE 推送失败（结果已缓存，客户端可轮询）: {}", scanId, e);
@@ -151,10 +125,5 @@ public class AsyncScanProcessor {
             case INFECTED, REJECTED -> "threat";
             default -> "error";
         };
-    }
-
-    /** 从等待缓存移除 emitter，返回移除的实例（可能为 null） */
-    private SseEmitter removeEmitter(String scanId) {
-        return pendingEmitters.asMap().remove(scanId);
     }
 }

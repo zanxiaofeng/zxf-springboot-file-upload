@@ -1,34 +1,44 @@
 package zxf.upload.service;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import zxf.upload.config.VirusScanProperties;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.*;
 
-/**
- * YARA 封装测试：enabled=false 是完整逃生舱。
- */
+@DisplayName("YaraScanner disabled 逃生舱")
 class YaraScannerTest {
 
-    @Test
-    void constructor_disabled_skipsRulesResolution() {
-        // 规则文件不存在也不应影响启动：关闭开关即完全绕过
-        VirusScanProperties properties = new VirusScanProperties();
-        properties.getYara().setEnabled(false);
-        properties.getYara().setRulesPath("classpath:rules/nonexistent.yar");
+    @TempDir Path tempDir;
+    private VirusScanProperties properties;
 
-        assertThatCode(() -> new YaraScanner(properties)).doesNotThrowAnyException();
+    @BeforeEach
+    void setUp() {
+        properties = new VirusScanProperties();
+        properties.getYara().setEnabled(false);
     }
 
     @Test
-    void scan_disabled_returnsNullWithoutRulesFile() {
-        VirusScanProperties properties = new VirusScanProperties();
-        properties.getYara().setEnabled(false);
-        properties.getYara().setRulesPath("classpath:rules/nonexistent.yar");
+    @DisplayName("enabled=false 时 scan 直接返回 null（不触碰 yara 进程）")
+    void disabled_returnsNull() throws Exception {
+        // 即使规则路径无效，enabled=false 也不会解析
+        properties.getYara().setRulesPath("classpath:nonexistent.yar");
+        var scanner = new YaraScanner(properties);
 
-        assertThat(new YaraScanner(properties).scan(Path.of("any-file"))).isNull();
+        Path file = tempDir.resolve("test.txt");
+        Files.writeString(file, "content");
+        assertThat(scanner.scan(file)).isNull();
+    }
+
+    @Test
+    @DisplayName("enabled=false 时构造不抛异常（规则文件缺失也能启动）")
+    void disabled_constructionWithoutRules() {
+        properties.getYara().setRulesPath("classpath:does-not-exist.yar");
+        assertThatCode(() -> new YaraScanner(properties)).doesNotThrowAnyException();
     }
 }

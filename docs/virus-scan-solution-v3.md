@@ -6,7 +6,7 @@
 
 **Architecture:** `上传 → 预检（大小/扩展名，未落盘）→ 暂存落盘 → 扫描管道（Tika 类型校验 → ClamAV → YARA → 文档威胁检测）→ 入库 / 隔离 / 清理`。暂存文件生命周期完全由扫描管道内部管理，调用方不接触临时文件。
 
-**Tech Stack:** Spring Boot 4.1, Java 21（Virtual Threads）, ClamAV (xyz.capybara:clamav-client 2.1.2), YARA CLI (ProcessBuilder), Apache Tika 2.9.x, commons-compress 1.27+, Apache POI 5.3+, Lombok
+**Tech Stack:** Spring Boot 4.1, Java 21（Virtual Threads）, ClamAV (xyz.capybara:clamav-client 2.1.2), YARA CLI (ProcessBuilder), Apache Tika 3.3.x, commons-compress 1.28+, Apache POI 5.5+, Lombok
 
 ---
 
@@ -104,21 +104,21 @@ zxf-springboot-file-upload/
     <dependency>
         <groupId>org.apache.tika</groupId>
         <artifactId>tika-core</artifactId>
-        <version>2.9.2</version>
+        <version>3.3.2</version>
     </dependency>
 
     <!-- ZIP 炸弹防护（流式） -->
     <dependency>
         <groupId>org.apache.commons</groupId>
         <artifactId>commons-compress</artifactId>
-        <version>1.27.1</version>
+        <version>1.28.0</version>
     </dependency>
 
     <!-- OLE2 宏检测（POIFS + VBAMacroReader） -->
     <dependency>
         <groupId>org.apache.poi</groupId>
         <artifactId>poi</artifactId>
-        <version>5.3.0</version>
+        <version>5.5.1</version>
     </dependency>
 
     <!-- 异步扫描结果缓存 TTL 淘汰 -->
@@ -131,7 +131,7 @@ zxf-springboot-file-upload/
     <dependency>
         <groupId>io.github.resilience4j</groupId>
         <artifactId>resilience4j-circuitbreaker</artifactId>
-        <version>2.3.0</version>
+        <version>2.4.0</version>
     </dependency>
 
     <!-- Actuator：ClamAV 健康检查端点 -->
@@ -147,11 +147,12 @@ zxf-springboot-file-upload/
         <artifactId>spring-boot-webmvc-test</artifactId>
         <scope>test</scope>
     </dependency>
-    <!-- EICAR 端到端集成测试：Testcontainers 启动真实 ClamAV（Boot 4 BOM 不管理，显式版本） -->
+    <!-- EICAR 端到端集成测试：Testcontainers 2.0 启动真实 ClamAV（Boot 4 BOM 不管理，显式版本；
+         2.0 模块名加 testcontainers- 前缀，JUnit 4 支持已移除） -->
     <dependency>
         <groupId>org.testcontainers</groupId>
-        <artifactId>junit-jupiter</artifactId>
-        <version>1.21.3</version>
+        <artifactId>testcontainers-junit-jupiter</artifactId>
+        <version>2.0.4</version>
         <scope>test</scope>
     </dependency>
     <dependency>
@@ -166,6 +167,29 @@ zxf-springboot-file-upload/
     </dependency>
 </dependencies>
 ```
+
+```
+
+> **maven-compiler-plugin 3.12+ 注意**：默认不再从 classpath 自动发现注解处理器，必须显式声明 `annotationProcessorPaths`，否则 Lombok 不生效（编译通过但运行时 `Unresolved compilation problem`）：
+>
+> ```xml
+> <build>
+>     <plugins>
+>         <plugin>
+>             <groupId>org.apache.maven.plugins</groupId>
+>             <artifactId>maven-compiler-plugin</artifactId>
+>             <configuration>
+>                 <annotationProcessorPaths>
+>                     <path>
+>                         <groupId>org.projectlombok</groupId>
+>                         <artifactId>lombok</artifactId>
+>                     </path>
+>                 </annotationProcessorPaths>
+>             </configuration>
+>         </plugin>
+>     </plugins>
+> </build>
+> ```
 
 验证：`mvn compile -pl zxf-springboot-file-upload -q` → BUILD SUCCESS
 
@@ -1056,7 +1080,7 @@ public class DocumentThreatScanner {
         }
     }
 
-    private String scanOoxml(Path file) throws IOException {
+    private DocThreat scanOoxml(Path file) throws IOException {
         try (ZipFile zip = new ZipFile(file.toFile())) {
             boolean hasVba = false;
             boolean hasActiveX = false;
@@ -1083,7 +1107,7 @@ public class DocumentThreatScanner {
         }
     }
 
-    private String scanOle2(Path file) throws IOException {
+    private DocThreat scanOle2(Path file) throws IOException {
         try (VBAMacroReader reader = new VBAMacroReader(file.toFile())) {
             Map<String, String> macros = reader.readMacros();
             if (macros.isEmpty()) {
@@ -1106,7 +1130,7 @@ public class DocumentThreatScanner {
         }
     }
 
-    private String scanPdf(Path file) throws IOException {
+    private DocThreat scanPdf(Path file) throws IOException {
         boolean hasJavaScript = false;
         boolean hasOpenAction = false;
         int headLen = 0;   // chunk 首部保留的上一块重叠字节数（首块为 0，数据从 chunk[0] 起连续排布）
@@ -1775,7 +1799,7 @@ zxf:
 ```yaml
 services:
   clamav:
-    image: clamav/clamav:1.4
+    image: clamav/clamav:1.4.5
     container_name: clamav
     environment:
       CLAMD_STARTUP_TIMEOUT: "600"
@@ -1862,7 +1886,7 @@ volumes:
 
 ### 集成测试（EicarScanIT，Testcontainers + failsafe）
 
-- `@Testcontainers(disabledWithoutDocker = true)` + `@SpringBootTest(RANDOM_PORT)`，容器启动 `clamav/clamav:1.4`，`Wait.forListeningPort()` 等待就绪（clamd 加载完病毒库才监听端口，端口可连即就绪，首次下载库较慢故启动超时放宽至 10min）；
+- `@Testcontainers(disabledWithoutDocker = true)` + `@SpringBootTest(RANDOM_PORT)`，容器启动 `clamav/clamav:1.4.5`，`Wait.forListeningPort()` 等待就绪（clamd 加载完病毒库才监听端口，端口可连即就绪，首次下载库较慢故启动超时放宽至 10min）；
 - `@DynamicPropertySource` 注入 clamav host/port、`yara.enabled=false`（环境无 yara CLI）、临时存储目录；
 - 用 JDK `HttpClient` + `@LocalServerPort` 手工构造 multipart 请求（Boot 4 `TestRestTemplate` auto-config 兼容性有问题，JDK 原生更简洁无额外依赖）；
 - 上传 EICAR 文件断言 422 + `Eicar-Test-Signature`；上传干净文件断言 200 CLEAN —— 端到端验证 multipart 解析、Tika、INSTREAM 协议兼容性与隔离动作；

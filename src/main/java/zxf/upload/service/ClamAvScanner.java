@@ -4,9 +4,7 @@ import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.springframework.util.Assert;
 import xyz.capybara.clamav.ClamavClient;
 import xyz.capybara.clamav.Platform;
 import zxf.upload.config.VirusScanProperties;
@@ -34,7 +32,6 @@ public class ClamAvScanner {
     private final ClamavClient client;
     private final CircuitBreaker circuitBreaker;
 
-    @Autowired   // 多构造器时显式指定 Spring 使用此构造器注入
     public ClamAvScanner(VirusScanProperties properties) {
         this(createClient(properties.getClamav()));
     }
@@ -58,14 +55,10 @@ public class ClamAvScanner {
     }
 
     /**
-     * 扫描文件。
-     *
-     * @param file 待扫描文件，必须非空
      * @return null = 干净；非 null = 病毒描述
      * @throws ScanFailedException ClamAV 服务不可达/协议错误/熔断中
      */
     public String scan(Path file) {
-        Assert.notNull(file, "file must not be null");
         try {
             return circuitBreaker.executeSupplier(() -> doScan(file));
         } catch (CallNotPermittedException e) {
@@ -73,19 +66,9 @@ public class ClamAvScanner {
         }
     }
 
-    /**
-     * Actuator 健康检查使用（PING/PONG），同样受熔断器保护防止挂起。
-     */
+    /** Actuator 健康检查使用（PING/PONG） */
     public void ping() {
-        try {
-            circuitBreaker.executeSupplier(() -> {
-                client.ping();
-                return null;
-            });
-        } catch (CallNotPermittedException e) {
-            // 熔断中：健康检查标记为不可用，不再触碰引擎
-            throw new ScanFailedException("ClamAV 熔断中", e);
-        }
+        client.ping();
     }
 
     private String doScan(Path file) {

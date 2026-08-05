@@ -2,18 +2,15 @@ package zxf.upload.service;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.util.Assert;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.ScanResult;
 import zxf.upload.model.ScanStatus;
 import zxf.upload.model.exception.ScanFailedException;
-import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Semaphore;
-
-import zxf.upload.service.DocumentThreatScanner.DocThreat;
 
 /**
  * 扫描管道。输入为 staging 文件 Path，拥有该文件的完整生命周期：
@@ -53,13 +50,9 @@ public class VirusScanService {
 
     /**
      * 执行完整扫描管道。
-     *
-     * @param stagingFile      已落盘的暂存文件，必须非空
-     * @param originalFilename 原始文件名，用于日志与隔离命名
      * @return CLEAN 时 details 为正式存储路径；其余状态 staging 文件已被妥善处理
      */
     public ScanResult scanFile(Path stagingFile, String originalFilename) {
-        Assert.notNull(stagingFile, "stagingFile must not be null");
         try {
             scanPermits.acquire();   // 背压闸门：许可耗尽时（虚拟线程）挂起等待，成本极低
         } catch (InterruptedException e) {
@@ -76,58 +69,50 @@ public class VirusScanService {
     private ScanResult doScanWithCleanup(Path stagingFile, String originalFilename) {
         try {
             ScanResult result = doScan(stagingFile, originalFilename);
-            return switch (result.getStatus()) {
-                case CLEAN -> storeCleanResult(stagingFile, originalFilename, result);
-                case INFECTED -> quarantineInfected(stagingFile, originalFilename, result);
-                default -> {
-                    FileUtils.deleteQuietly(stagingFile);
-                    yield result;
+            switch (result.getStatus()) {
+                case CLEAN -> {
+                    String stored = storageService.store(stagingFile, originalFilename);
+                    deleteQuietly(stagingFile);
+                    log.info("Scan passed: {} -> {}", originalFilename, stored);
+                    return ScanResult.builder()
+                            .status(ScanStatus.CLEAN)
+                            .detectedMime(result.getDetectedMime())
+                            .details(stored)
+                            .threat(result.getThreat())   // 保留打标（macro-flagged / scan-engine-degraded）
+                            .build();
                 }
-            };
+                case INFECTED -> {
+                    storageService.moveToQuarantine(stagingFile);
+                    log.warn("Infected file quarantined: {}", originalFilename);
+                    return result;
+                }
+                default -> {
+                    deleteQuietly(stagingFile);
+                    return result;
+                }
+            }
         } catch (ScanFailedException e) {
             // fail 策略统一收口：CLOSED 上抛（转 502）；OPEN 降级放行并打标
             if (properties.getFailStrategy() == VirusScanProperties.FailStrategy.OPEN) {
                 log.error("Scan engine failed, fail-open policy applied: {}", e.getMessage(), e);
-                return storeWithDegradedMark(stagingFile, originalFilename, e);
+                try {
+                    // 先入库再清理：若先 delete，store 将读不到文件
+                    String stored = storageService.store(stagingFile, originalFilename);
+                    deleteQuietly(stagingFile);
+                    return ScanResult.builder()
+                            .status(ScanStatus.CLEAN)
+                            .details(stored)
+                            .threat("scan-engine-degraded")
+                            .build();
+                } catch (IOException ioe) {
+                    throw new ScanFailedException("fail-open 降级存储失败", ioe);
+                }
             }
-            FileUtils.deleteQuietly(stagingFile);
+            deleteQuietly(stagingFile);
             throw e;
         } catch (IOException e) {
-            FileUtils.deleteQuietly(stagingFile);
+            deleteQuietly(stagingFile);
             throw new ScanFailedException("扫描管道 IO 异常: " + e.getMessage(), e);
-        }
-    }
-
-    private ScanResult storeCleanResult(Path stagingFile, String originalFilename, ScanResult result) throws IOException {
-        String stored = storageService.store(stagingFile, originalFilename);
-        FileUtils.deleteQuietly(stagingFile);
-        log.info("Scan passed: {} -> {}", originalFilename, stored);
-        return ScanResult.builder()
-                .status(ScanStatus.CLEAN)
-                .detectedMime(result.getDetectedMime())
-                .details(stored)
-                .threat(result.getThreat())   // 保留打标（macro-flagged / scan-engine-degraded）
-                .build();
-    }
-
-    private ScanResult quarantineInfected(Path stagingFile, String originalFilename, ScanResult result) {
-        storageService.moveToQuarantine(stagingFile);
-        log.warn("Infected file quarantined: {}", originalFilename);
-        return result;
-    }
-
-    private ScanResult storeWithDegradedMark(Path stagingFile, String originalFilename, ScanFailedException cause) {
-        try {
-            // 先入库再清理：若先 delete，store 将读不到文件
-            String stored = storageService.store(stagingFile, originalFilename);
-            FileUtils.deleteQuietly(stagingFile);
-            return ScanResult.builder()
-                    .status(ScanStatus.CLEAN)
-                    .details(stored)
-                    .threat("scan-engine-degraded")
-                    .build();
-        } catch (IOException ioe) {
-            throw new ScanFailedException("fail-open 降级存储失败", ioe);
         }
     }
 
@@ -157,10 +142,10 @@ public class VirusScanService {
 
         // 阶段 4：文档威胁（复用 mime，不重复探测）
         if (fileTypeValidator.isDocumentFormat(mime)) {
-            DocThreat docThreat = documentThreatScanner.scan(stagingFile, mime);
+            DocumentThreatScanner.DocThreat docThreat = documentThreatScanner.scan(stagingFile, mime);
             if (docThreat != null) {
                 // 宏策略分级：FLAG 放行并打标告警；ActiveX/PDF 危险动作始终拦截
-                if (docThreat.kind() == DocThreat.Kind.MACRO
+                if (docThreat.kind() == DocumentThreatScanner.DocThreat.Kind.MACRO
                         && properties.getMacroPolicy() == VirusScanProperties.MacroPolicy.FLAG) {
                     log.warn("含宏文档按 FLAG 策略放行: {} - {}", originalFilename, docThreat.description());
                     return ScanResult.builder()
@@ -175,5 +160,13 @@ public class VirusScanService {
         }
 
         return ScanResult.clean(stagingFile, mime);
+    }
+
+    private void deleteQuietly(Path path) {
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException e) {
+            log.error("清理暂存文件失败: {}", path, e);
+        }
     }
 }

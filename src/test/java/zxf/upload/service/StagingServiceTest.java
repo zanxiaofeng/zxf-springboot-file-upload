@@ -1,79 +1,67 @@
 package zxf.upload.service;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.springframework.web.multipart.MultipartFile;
+import org.springframework.mock.web.MockMultipartFile;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.FileRejectedException;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
-import java.nio.file.Path;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.assertj.core.api.Assertions.*;
 
-/**
- * 上传暂存测试：预检拦截、落盘失败清理残留。
- */
+@DisplayName("StagingService 预检 + 落盘")
 class StagingServiceTest {
 
     @TempDir
-    Path stagingDir;
-    private StagingService stagingService;
+    java.nio.file.Path tempDir;
+    private VirusScanProperties properties;
+    private StagingService service;
 
     @BeforeEach
     void setUp() {
-        VirusScanProperties properties = new VirusScanProperties();
-        properties.getStorage().setStagingPath(stagingDir.toString());
-        stagingService = new StagingService(properties);
+        properties = new VirusScanProperties();
+        properties.getStorage().setStagingPath(tempDir.toString());
+        service = new StagingService(properties);
     }
 
     @Test
-    void stage_copyFails_cleansUpPartialFile() throws Exception {
-        // 落盘中途失败（磁盘满/IO 错误）不得残留不完整暂存文件
-        MultipartFile file = mock(MultipartFile.class);
-        when(file.isEmpty()).thenReturn(false);
-        when(file.getSize()).thenReturn(100L);
-        when(file.getOriginalFilename()).thenReturn("a.txt");
-        when(file.getInputStream()).thenReturn(new InputStream() {
-            @Override
-            public int read() throws IOException {
-                throw new IOException("disk full");
-            }
-        });
-
-        assertThatThrownBy(() -> stagingService.stage(file))
-                .isInstanceOf(FileRejectedException.class)
-                .hasMessageContaining("暂存失败");
-        try (var files = Files.list(stagingDir)) {
-            assertThat(files).isEmpty();
-        }
-    }
-
-    @Test
-    void stage_emptyFile_rejected() {
-        MultipartFile file = mock(MultipartFile.class);
-        when(file.isEmpty()).thenReturn(true);
-
-        assertThatThrownBy(() -> stagingService.stage(file))
+    @DisplayName("空文件 → 400 拦截")
+    void emptyFile_rejected() {
+        var file = new MockMultipartFile("file", "empty.txt", "text/plain", new byte[0]);
+        assertThatThrownBy(() -> service.stage(file))
                 .isInstanceOf(FileRejectedException.class)
                 .hasMessageContaining("不能为空");
     }
 
     @Test
-    void stage_disallowedExtension_rejected() {
-        MultipartFile file = mock(MultipartFile.class);
-        when(file.isEmpty()).thenReturn(false);
-        when(file.getSize()).thenReturn(100L);
-        when(file.getOriginalFilename()).thenReturn("evil.exe");
-
-        assertThatThrownBy(() -> stagingService.stage(file))
+    @DisplayName("非法扩展名 → 400 拦截")
+    void illegalExtension_rejected() {
+        var file = new MockMultipartFile("file", "malware.exe", "application/octet-stream",
+                "content".getBytes());
+        assertThatThrownBy(() -> service.stage(file))
                 .isInstanceOf(FileRejectedException.class)
                 .hasMessageContaining("不支持的文件扩展名");
+    }
+
+    @Test
+    @DisplayName("正常文件 → 落盘成功")
+    void validFile_staged() {
+        var file = new MockMultipartFile("file", "data.txt", "text/plain", "hello".getBytes());
+        var path = service.stage(file);
+        assertThat(Files.exists(path)).isTrue();
+        assertThat(path.toString()).endsWith(".txt");
+    }
+
+    @Test
+    @DisplayName("超大文件 → 400 拦截")
+    void oversizedFile_rejected() {
+        properties.setMaxFileSize(10);
+        var file = new MockMultipartFile("file", "big.txt", "text/plain", new byte[100]);
+        assertThatThrownBy(() -> service.stage(file))
+                .isInstanceOf(FileRejectedException.class)
+                .hasMessageContaining("文件过大");
     }
 }

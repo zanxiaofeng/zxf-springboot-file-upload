@@ -1,85 +1,92 @@
 package zxf.upload.service;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import xyz.capybara.clamav.ClamavClient;
-import xyz.capybara.clamav.ClamavException;
+import xyz.capybara.clamav.commands.scan.result.ScanResult;
 import zxf.upload.model.exception.ScanFailedException;
 
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
-/**
- * ClamAV 封装测试：结果透传、故障包装、熔断快速失败、健康检查委托。
- */
+@DisplayName("ClamAvScanner 熔断 + 扫描")
 class ClamAvScannerTest {
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
+    private ClamavClient client;
+    private ClamAvScanner scanner;
+    private Path cleanFile;
 
-    @Test
-    void scan_cleanFile_returnsNull() throws Exception {
-        ClamavClient client = mock(ClamavClient.class);
-        when(client.scan(any(InputStream.class)))
-                .thenReturn(xyz.capybara.clamav.commands.scan.result.ScanResult.OK.INSTANCE);
-        ClamAvScanner scanner = new ClamAvScanner(client);
-        Path file = Files.writeString(tempDir.resolve("clean.txt"), "hello");
-
-        assertThat(scanner.scan(file)).isNull();
+    @BeforeEach
+    @SuppressWarnings("unchecked")
+    void setUp() throws Exception {
+        client = mock(ClamavClient.class);
+        scanner = new ClamAvScanner(client);
+        cleanFile = tempDir.resolve("clean.txt");
+        Files.writeString(cleanFile, "clean");
     }
 
     @Test
-    void scan_engineFailure_wrappedAsScanFailed() throws Exception {
-        ClamavClient client = mock(ClamavClient.class);
-        when(client.scan(any(InputStream.class)))
-                .thenThrow(new ClamavException(new RuntimeException("connection refused")));
-        ClamAvScanner scanner = new ClamAvScanner(client);
-        Path file = Files.writeString(tempDir.resolve("a.txt"), "x");
+    @DisplayName("干净文件 → null")
+    void cleanFile_returnsNull() {
+        when(client.scan(any(InputStream.class))).thenReturn(ScanResult.OK.INSTANCE);
+        assertThat(scanner.scan(cleanFile)).isNull();
+    }
 
-        assertThatThrownBy(() -> scanner.scan(file))
+    @Test
+    @DisplayName("病毒文件 → 返回威胁描述")
+    void virusFound_returnsThreat() {
+        var virusFound = mock(ScanResult.VirusFound.class);
+        when(virusFound.getFoundViruses())
+                .thenReturn(Map.of("stream", List.of("Eicar-Test-Signature")));
+        when(client.scan(any(InputStream.class))).thenReturn(virusFound);
+
+        String threat = scanner.scan(cleanFile);
+        assertThat(threat).contains("Eicar-Test-Signature");
+    }
+
+    @Test
+    @DisplayName("引擎异常 → ScanFailedException 包装")
+    void engineError_wrapsException() {
+        when(client.scan(any(InputStream.class))).thenThrow(new RuntimeException("Connection refused"));
+
+        assertThatThrownBy(() -> scanner.scan(cleanFile))
                 .isInstanceOf(ScanFailedException.class)
-                .hasMessageContaining("ClamAV 扫描失败");
+                .hasMessageContaining("Connection refused");
     }
 
     @Test
-    void scan_persistentFailures_circuitOpensAndFailsFast() throws Exception {
-        // capybara 无 socket 超时，引擎挂起时熔断器是防止级联耗尽的最后防线
-        ClamavClient client = mock(ClamavClient.class);
-        when(client.scan(any(InputStream.class)))
-                .thenThrow(new ClamavException(new RuntimeException("down")));
-        ClamAvScanner scanner = new ClamAvScanner(client);
-        Path file = Files.writeString(tempDir.resolve("a.txt"), "x");
+    @DisplayName("持续失败达阈值 → 熔断打开后快速失败")
+    void circuitBreaker_opensAfterFailures() {
+        when(client.scan(any(InputStream.class))).thenThrow(new RuntimeException("Connection refused"));
 
-        // 前 5 次真实失败：达到 minCalls=5 且失败率 100% ≥ 50%，熔断随即打开
+        // 触发足够多次失败使熔断器打开（slidingWindowSize=10, minimumNumberOfCalls=5, failureRateThreshold=50）
         for (int i = 0; i < 5; i++) {
-            assertThatThrownBy(() -> scanner.scan(file))
-                    .isInstanceOf(ScanFailedException.class)
-                    .hasMessageContaining("ClamAV 扫描失败");
+            assertThatThrownBy(() -> scanner.scan(cleanFile))
+                    .isInstanceOf(ScanFailedException.class);
         }
 
-        // 第 6 次起熔断快速失败，不再触碰引擎
-        assertThatThrownBy(() -> scanner.scan(file))
+        // 熔断打开后应快速失败，不再触碰引擎
+        long callCount = mockingDetails(client).getInvocations().stream()
+                .filter(inv -> inv.getMethod().getName().equals("scan")).count();
+        assertThatThrownBy(() -> scanner.scan(cleanFile))
                 .isInstanceOf(ScanFailedException.class)
                 .hasMessageContaining("熔断中");
-        verify(client, times(5)).scan(any(InputStream.class));
     }
 
     @Test
-    void ping_delegatesToClient() {
-        ClamavClient client = mock(ClamavClient.class);
-        ClamAvScanner scanner = new ClamAvScanner(client);
-
+    @DisplayName("ping 委托 client")
+    void ping_delegates() {
         scanner.ping();
-
         verify(client).ping();
     }
 }

@@ -1,34 +1,34 @@
 package zxf.upload.support;
 
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.stereotype.Component;
 import zxf.upload.service.ClamAvScanner;
 
 /**
- * ClamAV 健康检查（PING/PONG），暴露于 /actuator/health。
- * ClamAV 不可达时整体标记 DOWN，供 K8s readiness/负载均衡摘流。
+ * ClamAV PING 健康检查（/actuator/health）。
+ * PING 成功 → UP；PING 异常 → DOWN。
  */
-@Component("clamav")
+@Slf4j
+@Component
+@RequiredArgsConstructor
 public class ClamAvHealthIndicator implements HealthIndicator {
+
     private final ClamAvScanner clamAvScanner;
 
-    public ClamAvHealthIndicator(ClamAvScanner clamAvScanner) {
-        this.clamAvScanner = clamAvScanner;
-    }
-
-    /**
-     * 检查 ClamAV 是否可达。
-     *
-     * @return UP 表示 PING 成功；DOWN 包含异常原因
-     */
     @Override
     public Health health() {
         try {
             clamAvScanner.ping();
-            return Health.up().build();
+            return Health.up().withDetail("engine", "ClamAV").build();
         } catch (Exception e) {
-            return Health.down(e).build();
+            log.warn("ClamAV health check failed: {}", e.getMessage());
+            return Health.down()
+                    .withDetail("engine", "ClamAV")
+                    .withDetail("error", e.getMessage())
+                    .build();
         }
     }
 }

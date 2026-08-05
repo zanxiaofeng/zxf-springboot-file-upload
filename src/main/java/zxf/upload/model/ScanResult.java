@@ -20,20 +20,10 @@ public class ScanResult {
     Path stagingPath;
     String detectedMime;
 
-    /**
-     * @return 是否为 CLEAN 状态
-     */
     public boolean isClean() {
         return status == ScanStatus.CLEAN;
     }
 
-    /**
-     * 构造 CLEAN 结果。
-     *
-     * @param stagingPath  暂存文件路径
-     * @param detectedMime 探测到的 MIME 类型
-     * @return CLEAN 结果
-     */
     public static ScanResult clean(Path stagingPath, String detectedMime) {
         return ScanResult.builder()
                 .status(ScanStatus.CLEAN)
@@ -42,13 +32,6 @@ public class ScanResult {
                 .build();
     }
 
-    /**
-     * 构造 INFECTED 结果。
-     *
-     * @param stagingPath 暂存文件路径
-     * @param threat      威胁描述
-     * @return INFECTED 结果
-     */
     public static ScanResult infected(Path stagingPath, String threat) {
         return ScanResult.builder()
                 .status(ScanStatus.INFECTED)
@@ -57,13 +40,6 @@ public class ScanResult {
                 .build();
     }
 
-    /**
-     * 构造 REJECTED 结果。
-     *
-     * @param stagingPath 暂存文件路径
-     * @param reason      拒绝原因
-     * @return REJECTED 结果
-     */
     public static ScanResult rejected(Path stagingPath, String reason) {
         return ScanResult.builder()
                 .status(ScanStatus.REJECTED)
@@ -72,13 +48,6 @@ public class ScanResult {
                 .build();
     }
 
-    /**
-     * 构造 ERROR 结果。
-     *
-     * @param stagingPath 暂存文件路径
-     * @param message     错误消息
-     * @return ERROR 结果
-     */
     public static ScanResult error(Path stagingPath, String message) {
         return ScanResult.builder()
                 .status(ScanStatus.ERROR)

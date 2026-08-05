@@ -52,7 +52,7 @@ Eclipse JDT Language Server (jdtls)   ← Red Hat 维护，Language Support for 
 
 ### 2.1 JDK 安装与多版本管理
 
-- 推荐 JDK 21（LTS），Spring Boot 3.x / 4.x 基线。
+- 推荐 JDK 21（LTS），Spring Boot 3.x / 4.x 均以 JDK 17 为最低基线，JDK 21 是虚拟线程等特性的推荐版本。
 - macOS / Linux 推荐用 **SDKMAN!** 管理多版本：
 
 ```bash
@@ -394,7 +394,7 @@ spring.devtools.livereload.enabled=false
 ```json
 {
   "java.checkstyle.configuration": "${workspaceFolder}/config/checkstyle/checkstyle.xml",
-  "java.checkstyle.version": "10.17.0"
+  "java.checkstyle.version": "13.8.0"
 }
 ```
 
@@ -408,7 +408,7 @@ spring.devtools.livereload.enabled=false
   <artifactId>spotless-maven-plugin</artifactId>
   <configuration>
     <java>
-      <googleJavaFormat><version>1.22.0</version></googleJavaFormat>
+      <googleJavaFormat><version>1.35.0</version></googleJavaFormat>
       <importOrder><order>javax,java,org,com,\#</order></importOrder>
       <removeUnusedImports/>
     </java>

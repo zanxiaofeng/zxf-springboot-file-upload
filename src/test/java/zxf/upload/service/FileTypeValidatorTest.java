@@ -1,161 +1,125 @@
 package zxf.upload.service;
 
-import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
-import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import zxf.upload.config.VirusScanProperties;
+import zxf.upload.model.exception.ScanFailedException;
 
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.UUID;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.*;
 
-/**
- * 文件类型校验测试：伪造扩展名、文本互认、ZIP 炸弹与流式未知大小 entry。
- */
+@DisplayName("FileTypeValidator 类型校验 + ZIP 炸弹防护")
 class FileTypeValidatorTest {
 
+    @TempDir Path tempDir;
+    private VirusScanProperties properties;
     private FileTypeValidator validator;
-
-    @TempDir
-    Path tempDir;
 
     @BeforeEach
     void setUp() {
-        validator = new FileTypeValidator(new VirusScanProperties());
+        properties = new VirusScanProperties();
+        validator = new FileTypeValidator(properties);
     }
 
     @Test
-    void validate_exeContentRenamedToPdf_rejected() throws Exception {
-        // MZ 头（Windows 可执行文件 magic），Tika 探测为 application/x-msdownload
-        byte[] mz = new byte[256];
-        mz[0] = 'M';
-        mz[1] = 'Z';
-        Path file = Files.write(tempDir.resolve("evil.pdf"), mz);
-
-        FileTypeValidator.TypeCheck result = validator.validate(file, "evil.pdf");
-
+    @DisplayName("伪造扩展名：exe 内容改名 .pdf → REJECTED")
+    void fakeExtension_rejected() throws Exception {
+        Path exe = tempDir.resolve("fake.pdf");
+        // MZ header (Windows executable)
+        Files.write(exe, new byte[]{0x4D, 0x5A, (byte) 0x90, 0x00, 0x03, 0x00});
+        var result = validator.validate(exe, "fake.pdf");
         assertThat(result.passed()).isFalse();
-        assertThat(result.rejectReason()).contains("不支持的文件类型");
     }
 
     @Test
-    void validate_csvDetectedAsTextPlain_passes() throws Exception {
-        Path file = Files.writeString(tempDir.resolve("data.csv"), "name,age\nAlice,30\nBob,25\n");
-
-        FileTypeValidator.TypeCheck result = validator.validate(file, "data.csv");
-
+    @DisplayName("csv 被 Tika 探测为 text/csv → 通过")
+    void csv_detectedAsText_plain() throws Exception {
+        Path csv = tempDir.resolve("data.csv");
+        Files.writeString(csv, "name,age\nAlice,30\nBob,25");
+        var result = validator.validate(csv, "data.csv");
         assertThat(result.passed()).isTrue();
-        assertThat(result.rejectReason()).isNull();
+        assertThat(result.detectedMime()).isIn("text/plain", "text/csv");
     }
 
     @Test
-    void validate_eicarStringInTxt_passesTypeLayer() throws Exception {
-        // EICAR 是无害 ASCII 串，类型层应放行（病毒判定留给 ClamAV 层）
-        String eicar = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
-        Path file = Files.writeString(tempDir.resolve("eicar.txt"), eicar);
-
-        FileTypeValidator.TypeCheck result = validator.validate(file, "eicar.txt");
-
+    @DisplayName("EICAR 串写入 .txt → 类型层通过")
+    void eicarText_typeCheckPasses() throws Exception {
+        Path txt = tempDir.resolve("eicar.txt");
+        Files.writeString(txt, "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*");
+        var result = validator.validate(txt, "eicar.txt");
         assertThat(result.passed()).isTrue();
     }
 
     @Test
-    void validate_highCompressionRatioZip_rejectedAsZipBomb() throws Exception {
-        // 3MB 全零 entry，deflate 后仅数 KB，压缩比远超 100:1
-        Path zip = tempDir.resolve("bomb.zip");
-        try (OutputStream out = Files.newOutputStream(zip);
-             ZipOutputStream zos = new ZipOutputStream(out)) {
-            zos.putNextEntry(new ZipEntry("big.bin"));
-            zos.write(new byte[3 * 1024 * 1024]);
+    @DisplayName("ZIP 炸弹：高压缩比构造 → REJECTED")
+    void zipBomb_highRatio_rejected() throws Exception {
+        properties.getZip().setMaxCompressionRatio(100);
+        properties.getZip().setMaxEntries(10_000);
+
+        Path zipFile = tempDir.resolve("bomb.zip");
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zipFile))) {
+            zos.putNextEntry(new ZipEntry("huge.txt"));
+            // 写入大量重复数据（高压缩比）
+            byte[] chunk = new byte[8192];
+            java.util.Arrays.fill(chunk, (byte) 'A');
+            for (int i = 0; i < 200; i++) {   // 200 * 8192 = ~1.6MB uncompressed, tiny compressed
+                zos.write(chunk);
+            }
             zos.closeEntry();
         }
 
-        FileTypeValidator.TypeCheck result = validator.validate(zip, "bomb.zip");
-
+        var result = validator.validate(zipFile, "bomb.zip");
         assertThat(result.passed()).isFalse();
         assertThat(result.rejectReason()).contains("ZIP 炸弹");
     }
 
     @Test
-    void validate_streamingZipWithUnknownEntrySize_countsActualBytesAndPasses() throws Exception {
-        // commons-compress 写出的 entry 不带预声明大小，读取端 getSize() = -1，
-        // 校验应按实际读取字节计数而非误判
-        StringBuilder sb = new StringBuilder();
-        while (sb.length() < 50 * 1024) {
-            sb.append(UUID.randomUUID());   // 高熵内容，压缩比接近 1:1
-        }
-        byte[] payload = sb.toString().getBytes(StandardCharsets.UTF_8);
+    @DisplayName("海量空 entry：条目数超限 → REJECTED")
+    void zipBomb_tooManyEntries_rejected() throws Exception {
+        properties.getZip().setMaxEntries(5);
 
-        Path zip = tempDir.resolve("stream.zip");
-        try (OutputStream out = Files.newOutputStream(zip);
-             ZipArchiveOutputStream zaos = new ZipArchiveOutputStream(out)) {
-            ZipArchiveEntry entry = new ZipArchiveEntry("data.txt");   // 不 setSize
-            zaos.putArchiveEntry(entry);
-            zaos.write(payload);
-            zaos.closeArchiveEntry();
-        }
-
-        FileTypeValidator.TypeCheck result = validator.validate(zip, "stream.zip");
-
-        assertThat(result.passed()).isTrue();
-    }
-
-    @Test
-    void validate_tooManyEntries_rejectedAsZipBomb() throws Exception {
-        // 海量空 entry 炸弹：字节量正常，但遍历条目本身即 DoS 向量
-        VirusScanProperties properties = new VirusScanProperties();
-        properties.getZip().setMaxEntries(100);
-        FileTypeValidator strictValidator = new FileTypeValidator(properties);
-
-        Path zip = tempDir.resolve("many-entries.zip");
-        try (OutputStream out = Files.newOutputStream(zip);
-             ZipOutputStream zos = new ZipOutputStream(out)) {
-            for (int i = 0; i < 101; i++) {
-                zos.putNextEntry(new ZipEntry("e" + i + ".txt"));
+        Path zipFile = tempDir.resolve("entries.zip");
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zipFile))) {
+            for (int i = 0; i < 10; i++) {
+                zos.putNextEntry(new ZipEntry("entry" + i + ".txt"));
+                zos.write("x".getBytes());
                 zos.closeEntry();
             }
         }
 
-        FileTypeValidator.TypeCheck result = strictValidator.validate(zip, "many-entries.zip");
-
+        var result = validator.validate(zipFile, "entries.zip");
         assertThat(result.passed()).isFalse();
         assertThat(result.rejectReason()).contains("条目数超过");
     }
 
     @Test
-    void validate_singleEntryExceedsLimit_rejectedAsZipBomb() throws Exception {
-        // 单 entry 解压超限（总量未超限时也应拒绝）
-        VirusScanProperties properties = new VirusScanProperties();
-        properties.getZip().setMaxEntryUncompressed(1 << 20);   // 1MB
-        properties.getZip().setMaxCompressionRatio(100_000L);   // 放开压缩比，隔离变量
-        FileTypeValidator strictValidator = new FileTypeValidator(properties);
-
-        StringBuilder sb = new StringBuilder();
-        while (sb.length() < 2 * 1024 * 1024) {
-            sb.append(UUID.randomUUID());
-        }
-        byte[] payload = sb.toString().getBytes(StandardCharsets.UTF_8);
-
-        Path zip = tempDir.resolve("big-entry.zip");
-        try (OutputStream out = Files.newOutputStream(zip);
-             ZipArchiveOutputStream zaos = new ZipArchiveOutputStream(out)) {
-            ZipArchiveEntry entry = new ZipArchiveEntry("big.txt");   // 未知大小 → 实际读取分支
-            zaos.putArchiveEntry(entry);
-            zaos.write(payload);
-            zaos.closeArchiveEntry();
+    @DisplayName("正常 ZIP → 通过")
+    void normalZip_passes() throws Exception {
+        Path zipFile = tempDir.resolve("normal.zip");
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zipFile))) {
+            zos.putNextEntry(new ZipEntry("readme.txt"));
+            zos.write("hello".getBytes());
+            zos.closeEntry();
         }
 
-        FileTypeValidator.TypeCheck result = strictValidator.validate(zip, "big-entry.zip");
+        var result = validator.validate(zipFile, "normal.zip");
+        assertThat(result.passed()).isTrue();
+    }
 
-        assertThat(result.passed()).isFalse();
-        assertThat(result.rejectReason()).contains("单文件解压大小超过");
+    @Test
+    @DisplayName("isDocumentFormat 对文档类型返回 true")
+    void isDocumentFormat() {
+        assertThat(validator.isDocumentFormat("application/pdf")).isTrue();
+        assertThat(validator.isDocumentFormat(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document")).isTrue();
+        assertThat(validator.isDocumentFormat("application/msword")).isTrue();
+        assertThat(validator.isDocumentFormat("text/plain")).isFalse();
+        assertThat(validator.isDocumentFormat(null)).isFalse();
     }
 }

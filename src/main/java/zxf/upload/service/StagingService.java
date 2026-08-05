@@ -2,11 +2,9 @@ package zxf.upload.service;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.util.Assert;
 import org.springframework.web.multipart.MultipartFile;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.FileRejectedException;
-import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -38,14 +36,10 @@ public class StagingService {
 
     /**
      * 预检（未落盘，低成本）+ 落盘。
-     *
-     * @param file 上传文件，必须非空
      * @return 暂存文件路径
-     * @throws FileRejectedException 文件为空、过大或扩展名不支持
      */
     public Path stage(MultipartFile file) {
-        Assert.notNull(file, "file must not be null");
-        if (file.isEmpty()) {
+        if (file == null || file.isEmpty()) {
             throw new FileRejectedException("上传文件不能为空");
         }
         // 大小预检：落盘前拦截，防止超大文件打爆磁盘（容器级限制见 application.yml）
@@ -54,7 +48,9 @@ public class StagingService {
                     + properties.getMaxFileSize() / 1024 / 1024 + "MB");
         }
         String original = file.getOriginalFilename();
-        String ext = FileUtils.extension(original);
+        String ext = (original != null && original.contains("."))
+                ? original.substring(original.lastIndexOf('.') + 1).toLowerCase()
+                : "";
         // 扩展名预检（快路径，内容防伪由 Tika 负责）
         if (!ext.isEmpty() && !properties.getAllowedExtensions().contains(ext)) {
             throw new FileRejectedException("不支持的文件扩展名: " + ext);
@@ -65,8 +61,12 @@ public class StagingService {
             Files.copy(in, stagingFile, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
             // 落盘失败（磁盘满/IO 错误）时清理残留的不完整文件
-            FileUtils.deleteQuietly(stagingFile);
-            throw new FileRejectedException("文件暂存失败");
+            try {
+                Files.deleteIfExists(stagingFile);
+            } catch (IOException cleanupError) {
+                log.warn("清理失败的暂存文件失败: {}", stagingFile, cleanupError);
+            }
+            throw new FileRejectedException("文件暂存失败: " + e.getMessage());
         }
         log.debug("File staged: {} -> {}", original, stagingFile);
         return stagingFile;

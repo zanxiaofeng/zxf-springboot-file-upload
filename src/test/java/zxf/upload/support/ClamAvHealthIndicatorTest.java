@@ -1,33 +1,39 @@
 package zxf.upload.support;
 
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.health.contributor.Health;
-import org.springframework.boot.health.contributor.Status;
 import zxf.upload.service.ClamAvScanner;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
+import static org.assertj.core.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-/**
- * ClamAV 健康检查测试。
- */
+@DisplayName("ClamAvHealthIndicator 健康检查")
 class ClamAvHealthIndicatorTest {
 
     @Test
-    void health_clamavReachable_reportsUp() {
-        Health health = new ClamAvHealthIndicator(mock(ClamAvScanner.class)).health();
+    @DisplayName("PING 成功 → UP")
+    void pingSuccess_healthUp() {
+        ClamAvScanner scanner = mock(ClamAvScanner.class);
+        doNothing().when(scanner).ping();
 
-        assertThat(health.getStatus()).isEqualTo(Status.UP);
+        ClamAvHealthIndicator indicator = new ClamAvHealthIndicator(scanner);
+        Health health = indicator.health();
+
+        assertThat(health.getStatus()).isEqualTo(org.springframework.boot.health.contributor.Status.UP);
+        assertThat(health.getDetails()).containsEntry("engine", "ClamAV");
     }
 
     @Test
-    void health_clamavUnreachable_reportsDown() {
+    @DisplayName("PING 异常 → DOWN")
+    void pingFailure_healthDown() {
         ClamAvScanner scanner = mock(ClamAvScanner.class);
-        doThrow(new RuntimeException("connection refused")).when(scanner).ping();
+        doThrow(new RuntimeException("Connection refused")).when(scanner).ping();
 
-        Health health = new ClamAvHealthIndicator(scanner).health();
+        ClamAvHealthIndicator indicator = new ClamAvHealthIndicator(scanner);
+        Health health = indicator.health();
 
-        assertThat(health.getStatus()).isEqualTo(Status.DOWN);
+        assertThat(health.getStatus()).isEqualTo(org.springframework.boot.health.contributor.Status.DOWN);
+        assertThat(health.getDetails()).containsKey("error");
     }
 }

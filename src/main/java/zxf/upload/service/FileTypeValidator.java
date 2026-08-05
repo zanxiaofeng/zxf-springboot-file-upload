@@ -5,10 +5,8 @@ import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
 import org.apache.tika.Tika;
 import org.springframework.stereotype.Component;
-import org.springframework.util.Assert;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.ScanFailedException;
-import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -36,6 +34,7 @@ public class FileTypeValidator {
             Map.entry("image/gif", "gif"),
             Map.entry("image/bmp", "bmp"),
             Map.entry("text/plain", "txt"),
+            Map.entry("text/csv", "csv"),
             Map.entry("application/zip", "zip"));
 
     private final VirusScanProperties properties;
@@ -45,25 +44,10 @@ public class FileTypeValidator {
         this.properties = properties;
     }
 
-    /**
-     * 校验结果。detectedMime 供管道后续阶段复用。
-     *
-     * @param passed      是否通过
-     * @param detectedMime 探测到的 MIME 类型
-     * @param rejectReason 拒绝原因（通过时为 null）
-     */
-    public record TypeCheck(boolean passed, String detectedMime, String rejectReason) {
-    }
+    /** 校验结果。detectedMime 供管道后续阶段复用。 */
+    public record TypeCheck(boolean passed, String detectedMime, String rejectReason) {}
 
-    /**
-     * 校验文件类型与扩展名一致性，并对 ZIP 进行炸弹检测。
-     *
-     * @param file            待校验文件，必须非空
-     * @param originalFilename 原始文件名，用于扩展名一致性校验
-     * @return 校验结果
-     */
     public TypeCheck validate(Path file, String originalFilename) {
-        Assert.notNull(file, "file must not be null");
         final String detectedMime;
         try {
             detectedMime = tika.detect(file);
@@ -71,7 +55,7 @@ public class FileTypeValidator {
             throw new ScanFailedException("文件类型探测失败: " + e.getMessage(), e);
         }
 
-        String extension = FileUtils.extension(originalFilename);
+        String extension = extractExtension(originalFilename);
         log.debug("Type check: filename={}, ext={}, detected={}", originalFilename, extension, detectedMime);
 
         if (properties.getAllowedMimeTypes().stream().noneMatch(detectedMime::equalsIgnoreCase)) {
@@ -89,12 +73,6 @@ public class FileTypeValidator {
         return new TypeCheck(true, detectedMime, null);
     }
 
-    /**
-     * 判断 MIME 类型是否属于办公文档或 PDF。
-     *
-     * @param mimeType MIME 类型
-     * @return true 表示是文档格式
-     */
     public boolean isDocumentFormat(String mimeType) {
         return mimeType != null && (mimeType.contains("officedocument")
                 || mimeType.contains("msword") || mimeType.contains("ms-excel")
@@ -157,14 +135,21 @@ public class FileTypeValidator {
                     totalUncompressed += entrySize;
                 } else {
                     // 未知大小：实际读取计数，单 entry 与累计超限均即时中断
-                    EntryCount count = readEntryBytes(archive, buffer, totalUncompressed, guard);
-                    if (count.bombReason() != null) {
-                        return count.bombReason();
+                    long entryBytes = 0;
+                    int n;
+                    while ((n = archive.read(buffer)) != -1) {
+                        entryBytes += n;
+                        if (entryBytes > guard.getMaxEntryUncompressed()) {
+                            return singleEntryBombMessage(guard);
+                        }
+                        totalUncompressed += n;
+                        if (totalUncompressed > guard.getMaxTotalUncompressed()) {
+                            return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
+                        }
                     }
-                    totalUncompressed += count.bytes();
                 }
                 if (totalUncompressed > guard.getMaxTotalUncompressed()) {
-                    return totalSizeBombMessage(guard);
+                    return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
                 }
                 if (compressedSize > 0 && totalUncompressed > compressedSize * guard.getMaxCompressionRatio()) {
                     return "疑似 ZIP 炸弹，压缩比超过 " + guard.getMaxCompressionRatio() + ":1";
@@ -182,39 +167,14 @@ public class FileTypeValidator {
         return null;
     }
 
-    /**
-     * 读取单个未知大小 entry 的字节数，同时做炸弹校验。
-     *
-     * @param archive           ZIP 输入流
-     * @param buffer            读取缓冲区
-     * @param totalUncompressed 已统计的解压字节数
-     * @param guard             ZIP 防护配置
-     * @return entry 字节数与可能的炸弹原因
-     */
-    private EntryCount readEntryBytes(ZipArchiveInputStream archive, byte[] buffer,
-                                      long totalUncompressed, VirusScanProperties.ZipGuard guard) throws IOException {
-        long entryBytes = 0;
-        int n;
-        while ((n = archive.read(buffer)) != -1) {
-            entryBytes += n;
-            if (entryBytes > guard.getMaxEntryUncompressed()) {
-                return new EntryCount(entryBytes, singleEntryBombMessage(guard));
-            }
-            if (totalUncompressed + entryBytes > guard.getMaxTotalUncompressed()) {
-                return new EntryCount(entryBytes, totalSizeBombMessage(guard));
-            }
-        }
-        return new EntryCount(entryBytes, null);
-    }
-
     private String singleEntryBombMessage(VirusScanProperties.ZipGuard guard) {
-        return "疑似 ZIP 炸弹，单文件解压大小超过 " + guard.getMaxEntryUncompressed() / 1024 / 1024 + "MB";
+        return "疑似 ZIP 炸弹，单文件解压大小超过 " + (guard.getMaxEntryUncompressed() >> 20) + "MB";
     }
 
-    private String totalSizeBombMessage(VirusScanProperties.ZipGuard guard) {
-        return "疑似 ZIP 炸弹，累计解压大小超过 " + guard.getMaxTotalUncompressed() / 1024 / 1024 + "MB";
-    }
-
-    private record EntryCount(long bytes, String bombReason) {
+    private String extractExtension(String filename) {
+        if (filename == null || !filename.contains(".")) {
+            return "";
+        }
+        return filename.substring(filename.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
     }
 }
