@@ -20,12 +20,12 @@ zxf:
     zip:
       max-compression-ratio: 100
       max-total-uncompressed: 1073741824   # 1GB
-      max-nesting-depth: 2
       max-entries: 10000                  # 条目总数上限（海量 entry 炸弹）
       max-entry-uncompressed: 104857600   # 单 entry 解压上限 100MB
     clamav:
       host: ${CLAMAV_HOST:localhost}
       port: ${CLAMAV_PORT:3310}
+      timeout-seconds: ${CLAMAV_TIMEOUT_SECONDS:60}   # 单次扫描超时，挂起时快速失败并计入熔断
     yara:
       enabled: true
       binary-path: ${YARA_BINARY:yara}

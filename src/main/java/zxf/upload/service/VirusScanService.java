@@ -6,6 +6,7 @@ import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.ScanResult;
 import zxf.upload.model.ScanStatus;
 import zxf.upload.model.exception.ScanFailedException;
+import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -73,7 +74,7 @@ public class VirusScanService {
                 case CLEAN -> {
                     String stored = storageService.store(stagingFile, originalFilename);
                     deleteQuietly(stagingFile);
-                    log.info("Scan passed: {} -> {}", originalFilename, stored);
+                    log.info("Scan passed: {} -> {}", FileUtils.sanitizeForLog(originalFilename), stored);
                     return ScanResult.builder()
                             .status(ScanStatus.CLEAN)
                             .detectedMime(result.getDetectedMime())
@@ -83,7 +84,7 @@ public class VirusScanService {
                 }
                 case INFECTED -> {
                     storageService.moveToQuarantine(stagingFile);
-                    log.warn("Infected file quarantined: {}", originalFilename);
+                    log.warn("Infected file quarantined: {}", FileUtils.sanitizeForLog(originalFilename));
                     return result;
                 }
                 default -> {
@@ -142,12 +143,12 @@ public class VirusScanService {
 
         // 阶段 4：文档威胁（复用 mime，不重复探测）
         if (fileTypeValidator.isDocumentFormat(mime)) {
-            DocumentThreatScanner.DocThreat docThreat = documentThreatScanner.scan(stagingFile, mime);
+            DocumentThreatScanner.DocThreat docThreat = documentThreatScanner.scan(stagingFile);
             if (docThreat != null) {
                 // 宏策略分级：FLAG 放行并打标告警；ActiveX/PDF 危险动作始终拦截
                 if (docThreat.kind() == DocumentThreatScanner.DocThreat.Kind.MACRO
                         && properties.getMacroPolicy() == VirusScanProperties.MacroPolicy.FLAG) {
-                    log.warn("含宏文档按 FLAG 策略放行: {} - {}", originalFilename, docThreat.description());
+                    log.warn("含宏文档按 FLAG 策略放行: {} - {}", FileUtils.sanitizeForLog(originalFilename), docThreat.description());
                     return ScanResult.builder()
                             .status(ScanStatus.CLEAN)
                             .stagingPath(stagingFile)

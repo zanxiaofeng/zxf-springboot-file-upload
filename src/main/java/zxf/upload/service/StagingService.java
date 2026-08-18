@@ -5,6 +5,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.FileRejectedException;
+import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -49,7 +51,7 @@ public class StagingService {
         }
         String original = file.getOriginalFilename();
         String ext = (original != null && original.contains("."))
-                ? original.substring(original.lastIndexOf('.') + 1).toLowerCase()
+                ? original.substring(original.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT)
                 : "";
         // 扩展名预检（快路径，内容防伪由 Tika 负责）
         if (!ext.isEmpty() && !properties.getAllowedExtensions().contains(ext)) {
@@ -68,7 +70,7 @@ public class StagingService {
             }
             throw new FileRejectedException("文件暂存失败: " + e.getMessage());
         }
-        log.debug("File staged: {} -> {}", original, stagingFile);
+        log.debug("File staged: {} -> {}", FileUtils.sanitizeForLog(original), stagingFile);
         return stagingFile;
     }
 }

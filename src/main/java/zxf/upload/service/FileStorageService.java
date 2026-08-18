@@ -3,6 +3,7 @@ package zxf.upload.service;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import zxf.upload.config.VirusScanProperties;
+import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -38,7 +39,7 @@ public class FileStorageService {
         String ext = extractExtension(originalFilename);
         Path target = storagePath.resolve(UUID.randomUUID() + (ext.isEmpty() ? "" : "." + ext));
         Files.copy(sourceFile, target, StandardCopyOption.REPLACE_EXISTING);
-        log.info("File stored: {} -> {}", originalFilename, target);
+        log.info("File stored: {} -> {}", FileUtils.sanitizeForLog(originalFilename), target);
         return target.toAbsolutePath().toString();
     }
 

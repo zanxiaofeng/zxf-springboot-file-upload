@@ -65,7 +65,7 @@ public class FileTypeValidator {
             return new TypeCheck(false, detectedMime, "文件类型与扩展名不符，检测到: " + detectedMime);
         }
         if ("application/zip".equals(detectedMime)) {
-            String zipProblem = inspectZip(file, 1);
+            String zipProblem = inspectZip(file);
             if (zipProblem != null) {
                 return new TypeCheck(false, detectedMime, zipProblem);
             }
@@ -96,20 +96,20 @@ public class FileTypeValidator {
     }
 
     /**
-     * 流式 ZIP 检查（OWASP 解压炸弹防护五维度）：
+     * 流式 ZIP 检查（OWASP 解压炸弹防护）：
      * - 条目总数上限（海量空 entry 炸弹，遍历本身即 DoS 向量）；
      * - 单 entry 解压大小上限；
      * - getSize() 返回 -1 时按实际读取字节计数（边读边校验，超限即中断）；
      * - 累计解压总量绝对上限；
-     * - 压缩比上限 + 嵌套压缩包深度限制（递归炸弹）。
+     * - 压缩比上限。
+     *
+     * 不递归解压：内层 .zip 条目不展开检查（其条目大小仍计入压缩比与
+     * 累计总量预算），嵌套内容的威胁检测由 ClamAV/YARA 对原始字节扫描兜底。
      *
      * @return null = 通过；非 null = 拒绝原因
      */
-    private String inspectZip(Path file, int depth) {
+    private String inspectZip(Path file) {
         VirusScanProperties.ZipGuard guard = properties.getZip();
-        if (depth > guard.getMaxNestingDepth()) {
-            return "疑似嵌套 ZIP 炸弹，压缩包嵌套深度超过 " + guard.getMaxNestingDepth();
-        }
         long compressedSize;
         try {
             compressedSize = Files.size(file);
@@ -153,11 +153,6 @@ public class FileTypeValidator {
                 }
                 if (compressedSize > 0 && totalUncompressed > compressedSize * guard.getMaxCompressionRatio()) {
                     return "疑似 ZIP 炸弹，压缩比超过 " + guard.getMaxCompressionRatio() + ":1";
-                }
-                if (!entry.isDirectory()
-                        && entry.getName().toLowerCase(Locale.ROOT).endsWith(".zip")
-                        && depth + 1 > guard.getMaxNestingDepth()) {
-                    return "疑似嵌套 ZIP 炸弹，压缩包嵌套深度超过 " + guard.getMaxNestingDepth();
                 }
             }
         } catch (IOException e) {

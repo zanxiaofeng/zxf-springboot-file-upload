@@ -30,8 +30,7 @@ class DocumentThreatScannerTest {
     @DisplayName("含 vbaProject.bin 的 docx → MACRO 威胁")
     void docxWithVba_detectedAsMacro() throws Exception {
         Path docx = createOoxmlWithEntry("word/vbaProject.bin", "fake vba".getBytes());
-        DocThreat threat = scanner.scan(docx,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        DocThreat threat = scanner.scan(docx);
         assertThat(threat).isNotNull();
         assertThat(threat.kind()).isEqualTo(DocThreat.Kind.MACRO);
         assertThat(threat.description()).contains("VBA 宏");
@@ -41,8 +40,7 @@ class DocumentThreatScannerTest {
     @DisplayName("含 ActiveX 的 docx → ACTIVE_X 威胁")
     void docxWithActiveX_detected() throws Exception {
         Path docx = createOoxmlWithEntry("activeX/activeX1.xml", "<xml/>".getBytes());
-        DocThreat threat = scanner.scan(docx,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        DocThreat threat = scanner.scan(docx);
         assertThat(threat).isNotNull();
         assertThat(threat.kind()).isEqualTo(DocThreat.Kind.ACTIVE_X);
     }
@@ -51,8 +49,7 @@ class DocumentThreatScannerTest {
     @DisplayName("干净的 docx → null")
     void cleanDocx_returnsNull() throws Exception {
         Path docx = createOoxmlWithEntry("word/document.xml", "<xml/>".getBytes());
-        DocThreat threat = scanner.scan(docx,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        DocThreat threat = scanner.scan(docx);
         assertThat(threat).isNull();
     }
 
@@ -67,7 +64,7 @@ class DocumentThreatScannerTest {
             wb.write(fos);
         }
         // VBAMacroReader 对无宏的 HSSFWorkbook 返回空 map → null（验证良性路径不误判）
-        DocThreat threat = scanner.scan(xls, "application/vnd.ms-excel");
+        DocThreat threat = scanner.scan(xls);
         assertThat(threat).isNull();
     }
 
@@ -85,7 +82,7 @@ class DocumentThreatScannerTest {
                 + "trailer\n<< /Root 1 0 R >>\n%%EOF";
         Files.writeString(pdf, content);
 
-        DocThreat threat = scanner.scan(pdf, "application/pdf");
+        DocThreat threat = scanner.scan(pdf);
         assertThat(threat).isNotNull();
         assertThat(threat.kind()).isEqualTo(DocThreat.Kind.PDF_ACTION);
     }
@@ -101,7 +98,7 @@ class DocumentThreatScannerTest {
                 + "trailer\n<< /Root 1 0 R >>\n%%EOF";
         Files.writeString(pdf, content);
 
-        DocThreat threat = scanner.scan(pdf, "application/pdf");
+        DocThreat threat = scanner.scan(pdf);
         assertThat(threat).isNotNull();
         assertThat(threat.kind()).isEqualTo(DocThreat.Kind.PDF_ACTION);
         assertThat(threat.description()).contains("Launch");
@@ -117,7 +114,7 @@ class DocumentThreatScannerTest {
                 + "trailer\n<< /Root 1 0 R >>\n%%EOF";
         Files.writeString(pdf, content);
 
-        DocThreat threat = scanner.scan(pdf, "application/pdf");
+        DocThreat threat = scanner.scan(pdf);
         assertThat(threat).isNull();
     }
 

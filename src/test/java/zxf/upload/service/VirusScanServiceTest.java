@@ -146,7 +146,7 @@ class VirusScanServiceTest {
         when(fileTypeValidator.isDocumentFormat(any())).thenReturn(true);
         when(clamAvScanner.scan(any())).thenReturn(null);
         when(yaraScanner.scan(any())).thenReturn(null);
-        when(documentThreatScanner.scan(any(), any()))
+        when(documentThreatScanner.scan(any()))
                 .thenReturn(new DocumentThreatScanner.DocThreat("包含 VBA 宏", DocumentThreatScanner.DocThreat.Kind.MACRO));
         when(storageService.store(any(), any())).thenReturn("/data/stored/file.docx");
 
@@ -167,7 +167,7 @@ class VirusScanServiceTest {
         when(fileTypeValidator.isDocumentFormat(any())).thenReturn(true);
         when(clamAvScanner.scan(any())).thenReturn(null);
         when(yaraScanner.scan(any())).thenReturn(null);
-        when(documentThreatScanner.scan(any(), any()))
+        when(documentThreatScanner.scan(any()))
                 .thenReturn(new DocumentThreatScanner.DocThreat("包含 ActiveX 控件", DocumentThreatScanner.DocThreat.Kind.ACTIVE_X));
 
         VirusScanService svc = createService();

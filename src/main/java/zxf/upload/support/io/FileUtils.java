@@ -42,4 +42,12 @@ public class FileUtils {
         String ext = StringUtils.getFilenameExtension(filename);
         return ext != null ? ext.toLowerCase(Locale.ROOT) : "";
     }
+
+    /**
+     * 剥离 ISO 控制字符（防日志注入/log forging）：客户端可控的文件名
+     * 含 \r\n 时可在日志文件中伪造新行，入日志前必须净化。
+     */
+    public static String sanitizeForLog(String value) {
+        return value == null ? "" : value.replaceAll("\\p{Cntrl}", "_");
+    }
 }

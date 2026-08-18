@@ -22,7 +22,9 @@ import java.util.zip.ZipFile;
  * - PDF：分块 + 重叠窗口扫描 /JavaScript+/OpenAction、/Launch；
  *   对 FlateDecode 压缩对象流无效属已知限制，深度检测由 YARA 规则与 ClamAV 兜底
  *
- * 全程流式/分块读取，不整文件入内存。
+ * 内存策略：PDF 分块流式读取；OOXML 仅遍历条目名；OLE2 宏模块由 POI
+ * VBAMacroReader 提取（POI API 全量返回 Map，属已知限制），检测阶段
+ * 逐模块进行、不额外拼接副本。
  */
 @Slf4j
 @Component
@@ -48,7 +50,7 @@ public class DocumentThreatScanner {
     /**
      * @return null = 干净/非文档；非 null = 威胁检出
      */
-    public DocThreat scan(Path file, String detectedMime) {
+    public DocThreat scan(Path file) {
         String filename = file.getFileName().toString().toLowerCase(Locale.ROOT);
         try {
             if (filename.endsWith(".docx") || filename.endsWith(".xlsx") || filename.endsWith(".pptx")) {
@@ -101,13 +103,15 @@ public class DocumentThreatScanner {
             if (macros.isEmpty()) {
                 return null;
             }
-            StringBuilder all = new StringBuilder();
-            macros.values().forEach(code -> all.append(code.toLowerCase(Locale.ROOT)).append('\n'));
-            String code = all.toString();
-            for (String token : SUSPICIOUS_MACRO_TOKENS) {
-                if (code.contains(token)) {
-                    log.warn("OLE2 contains suspicious macro token '{}' in {}", token, file.getFileName());
-                    return new DocThreat("OLE2 文档包含可疑 VBA 宏（命中: " + token + "）", DocThreat.Kind.MACRO);
+            // 逐模块小写化后匹配（命中即返回），不拼接全局大字符串：
+            // 拼接会在 readMacros 已加载的宏之外再产生约一倍的内存副本
+            for (String code : macros.values()) {
+                String lowered = code.toLowerCase(Locale.ROOT);
+                for (String token : SUSPICIOUS_MACRO_TOKENS) {
+                    if (lowered.contains(token)) {
+                        log.warn("OLE2 contains suspicious macro token '{}' in {}", token, file.getFileName());
+                        return new DocThreat("OLE2 文档包含可疑 VBA 宏（命中: " + token + "）", DocThreat.Kind.MACRO);
+                    }
                 }
             }
             log.info("OLE2 contains benign macros: {}", file.getFileName());

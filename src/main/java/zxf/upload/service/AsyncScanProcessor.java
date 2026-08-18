@@ -78,21 +78,27 @@ public class AsyncScanProcessor {
     public void registerEmitter(String scanId, SseEmitter emitter) {
         // 先查结果缓存：扫描可能已先于 SSE 连接完成
         UploadResponse done = completedScans.getIfPresent(scanId);
-        if (done != null) {
-            try {
-                emitter.send(SseEmitter.event().name(eventName(done.getStatus())).data(done));
-                emitter.complete();
-            } catch (IOException e) {
-                log.warn("SSE 回放失败: {}", scanId, e);
+        if (done == null) {
+            pendingEmitters.put(scanId, emitter);
+            emitter.onCompletion(() -> pendingEmitters.asMap().remove(scanId, emitter));
+            emitter.onTimeout(() -> {
+                pendingEmitters.asMap().remove(scanId, emitter);
+                log.warn("SSE emitter 超时: {}", scanId);
+            });
+            // double-check：processScan 可能在上面查缓存与 put 之间完成，其 remove
+            // 拿不到本 emitter，需在此补发；若 processScan 已摘走 emitter（remove 返回
+            // false），推送由它负责，此处不重复发送（避免双发与 complete 后再 send）
+            done = completedScans.getIfPresent(scanId);
+            if (done == null || !pendingEmitters.asMap().remove(scanId, emitter)) {
+                return;
             }
-            return;
         }
-        pendingEmitters.put(scanId, emitter);
-        emitter.onCompletion(() -> pendingEmitters.asMap().remove(scanId));
-        emitter.onTimeout(() -> {
-            pendingEmitters.asMap().remove(scanId);
-            log.warn("SSE emitter 超时: {}", scanId);
-        });
+        try {
+            emitter.send(SseEmitter.event().name(eventName(done.getStatus())).data(done));
+            emitter.complete();
+        } catch (IOException e) {
+            log.warn("SSE 回放失败: {}", scanId, e);
+        }
     }
 
     @Async   // 使用 Boot 装配的虚拟线程执行器（spring.threads.virtual.enabled=true）
@@ -103,8 +109,10 @@ public class AsyncScanProcessor {
             String storedPath = result.isClean() ? result.getDetails() : null;
             response = UploadResponse.of(scanId, result, storedPath);
         } catch (Exception e) {
+            // 引擎故障细节（host:port、内部路径、异常消息）只进日志；对外通用文案，
+            // 与同步路径 GlobalExceptionHandler 对 ScanFailedException 的收口一致
             log.error("异步扫描失败: scanId={}", scanId, e);
-            response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描失败: " + e.getMessage(), null);
+            response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描引擎暂时不可用，请稍后重试", null);
         }
 
         completedScans.put(scanId, response);

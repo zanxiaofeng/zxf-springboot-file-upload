@@ -30,7 +30,7 @@ class ClamAvScannerTest {
     @SuppressWarnings("unchecked")
     void setUp() throws Exception {
         client = mock(ClamavClient.class);
-        scanner = new ClamAvScanner(client);
+        scanner = new ClamAvScanner(client, 60);
         cleanFile = tempDir.resolve("clean.txt");
         Files.writeString(cleanFile, "clean");
     }
@@ -78,6 +78,27 @@ class ClamAvScannerTest {
         // 熔断打开后应快速失败，不再触碰引擎
         long callCount = mockingDetails(client).getInvocations().stream()
                 .filter(inv -> inv.getMethod().getName().equals("scan")).count();
+        assertThatThrownBy(() -> scanner.scan(cleanFile))
+                .isInstanceOf(ScanFailedException.class)
+                .hasMessageContaining("熔断中");
+    }
+
+    @Test
+    @DisplayName("挂起扫描 → timeoutSeconds 内快速失败并计入熔断失败率")
+    void hangingScan_timesOutAndCountsAsFailure() throws Exception {
+        when(client.scan(any(InputStream.class))).thenAnswer(inv -> {
+            Thread.sleep(5000);          // 模拟 clamd 挂起：连接建立但无响应
+            return ScanResult.OK.INSTANCE;
+        });
+        scanner = new ClamAvScanner(client, 0);   // timeout=0 → get 立即超时（任务必未完成）
+
+        // 持续超时达到 minimumNumberOfCalls=5 且失败率 100% → 熔断打开
+        for (int i = 0; i < 5; i++) {
+            assertThatThrownBy(() -> scanner.scan(cleanFile))
+                    .isInstanceOf(ScanFailedException.class)
+                    .hasMessageContaining("超时");
+        }
+        // 熔断打开后快速失败，不再触碰引擎
         assertThatThrownBy(() -> scanner.scan(cleanFile))
                 .isInstanceOf(ScanFailedException.class)
                 .hasMessageContaining("熔断中");

@@ -82,8 +82,6 @@ public class VirusScanProperties {
         private long maxCompressionRatio = 100L;
         /** 累计解压字节上限（默认 1GB） */
         private long maxTotalUncompressed = 1L << 30;
-        /** 嵌套压缩包最大深度 */
-        private int maxNestingDepth = 2;
         /** 条目总数上限（防海量空 entry 炸弹：遍历本身即 DoS 向量） */
         private long maxEntries = 10_000L;
         /** 单 entry 解压后大小上限（默认 100MB，与 maxFileSize 对齐） */
@@ -95,6 +93,9 @@ public class VirusScanProperties {
         @NotBlank
         private String host = "localhost";
         private int port = 3310;
+        /** 单次扫描/socket 等待超时（秒）：capybara 2.1.2 无 socket 超时，超时计为熔断失败 */
+        @Min(1)
+        private long timeoutSeconds = 60;
     }
 
     @Data

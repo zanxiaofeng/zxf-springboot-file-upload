@@ -133,4 +133,14 @@ class FileUploadControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("SCANNING"));
     }
+
+    @Test
+    @DisplayName("X-Scan-Async 非法值 → 400 FILE_REJECTED")
+    void invalidAsyncHeader_returns400() throws Exception {
+        var file = new MockMultipartFile("file", "clean.txt", "text/plain", "hello".getBytes());
+
+        mvc.perform(multipart("/api/files/upload").file(file).header("X-Scan-Async", "1x"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("FILE_REJECTED"));
+    }
 }

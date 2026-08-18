@@ -19,6 +19,7 @@ import zxf.upload.service.StagingService;
 import zxf.upload.service.VirusScanService;
 
 import java.nio.file.Path;
+import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
@@ -31,10 +32,15 @@ public class FileUploadController {
     private final AsyncScanProcessor asyncProcessor;
     private final VirusScanProperties properties;
 
+    private static final Set<String> TRUE_VALUES = Set.of("true", "on", "yes", "1");
+    private static final Set<String> FALSE_VALUES = Set.of("false", "off", "no", "0");
+
     @PostMapping("/upload")
     public ResponseEntity<UploadResponse> upload(
             @RequestParam("file") MultipartFile file,
-            @RequestHeader(value = "X-Scan-Async", defaultValue = "false") boolean async) {
+            @RequestHeader(value = "X-Scan-Async", defaultValue = "false") String asyncHeader) {
+
+        boolean async = parseAsyncHeader(asyncHeader);
 
         // 大文件强制异步：同步全管道扫描耗时会超客户端/网关超时
         long syncMax = properties.getSyncMaxFileSize();
@@ -62,6 +68,25 @@ public class FileUploadController {
             case INFECTED -> throw new VirusDetectedException(result);
             default -> throw new ScanFailedException(result.getDetails());
         };
+    }
+
+    /**
+     * 显式解析 X-Scan-Async：沿用 Spring 原生 boolean 转换接受的取值
+     * （true/on/yes/1、false/off/no/0，忽略大小写），其余非法值按 400 拒绝，
+     * 避免落入类型转换异常被兜底 handler 映射为 500。
+     */
+    private boolean parseAsyncHeader(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String normalized = value.trim();
+        for (String t : TRUE_VALUES) {
+            if (t.equalsIgnoreCase(normalized)) return true;
+        }
+        for (String f : FALSE_VALUES) {
+            if (f.equalsIgnoreCase(normalized)) return false;
+        }
+        throw new FileRejectedException("X-Scan-Async 请求头取值非法: " + normalized);
     }
 
     /** SSE 推送（增强通道） */
