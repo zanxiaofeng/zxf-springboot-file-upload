@@ -143,4 +143,12 @@ class FileUploadControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("FILE_REJECTED"));
     }
+
+    @Test
+    @DisplayName("缺少 file part → 400 FILE_REJECTED（非 500 兜底）")
+    void missingFilePart_returns400() throws Exception {
+        mvc.perform(multipart("/api/files/upload"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("FILE_REJECTED"));
+    }
 }

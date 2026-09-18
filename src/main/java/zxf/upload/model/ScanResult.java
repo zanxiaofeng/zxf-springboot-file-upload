@@ -9,7 +9,7 @@ import java.nio.file.Path;
  * 扫描结果，不可变。
  * stagingPath：管道内暂存文件路径，所有状态均携带，供管道统一清理/隔离。
  * detectedMime：Tika 探测结果，随管道传递避免重复探测。
- * CLEAN 状态下 details 携带正式存储路径。
+ * CLEAN 状态下 details 携带正式存储文件名（不含路径，防内部路径外泄）。
  */
 @Value
 @Builder

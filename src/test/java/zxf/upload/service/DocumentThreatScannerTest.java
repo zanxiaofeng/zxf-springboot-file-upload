@@ -7,7 +7,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import zxf.upload.service.DocumentThreatScanner.DocThreat;
 
-import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.zip.ZipEntry;
@@ -17,6 +16,11 @@ import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("DocumentThreatScanner 文档威胁检测")
 class DocumentThreatScannerTest {
+
+    private static final String OOXML_MIME =
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    private static final String XLS_MIME = "application/vnd.ms-excel";
+    private static final String PDF_MIME = "application/pdf";
 
     @TempDir Path tempDir;
     private DocumentThreatScanner scanner;
@@ -30,7 +34,7 @@ class DocumentThreatScannerTest {
     @DisplayName("含 vbaProject.bin 的 docx → MACRO 威胁")
     void docxWithVba_detectedAsMacro() throws Exception {
         Path docx = createOoxmlWithEntry("word/vbaProject.bin", "fake vba".getBytes());
-        DocThreat threat = scanner.scan(docx);
+        DocThreat threat = scanner.scan(docx, OOXML_MIME);
         assertThat(threat).isNotNull();
         assertThat(threat.kind()).isEqualTo(DocThreat.Kind.MACRO);
         assertThat(threat.description()).contains("VBA 宏");
@@ -40,7 +44,24 @@ class DocumentThreatScannerTest {
     @DisplayName("含 ActiveX 的 docx → ACTIVE_X 威胁")
     void docxWithActiveX_detected() throws Exception {
         Path docx = createOoxmlWithEntry("activeX/activeX1.xml", "<xml/>".getBytes());
-        DocThreat threat = scanner.scan(docx);
+        DocThreat threat = scanner.scan(docx, OOXML_MIME);
+        assertThat(threat).isNotNull();
+        assertThat(threat.kind()).isEqualTo(DocThreat.Kind.ACTIVE_X);
+    }
+
+    @Test
+    @DisplayName("VBA + ActiveX 并存 → ACTIVE_X 优先拦截（不受宏 FLAG 策略放行影响）")
+    void docxWithVbaAndActiveX_activeXWins() throws Exception {
+        Path docx = tempDir.resolve("both.docx");
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(docx))) {
+            zos.putNextEntry(new ZipEntry("word/vbaProject.bin"));
+            zos.write("fake vba".getBytes());
+            zos.closeEntry();
+            zos.putNextEntry(new ZipEntry("activeX/activeX1.xml"));
+            zos.write("<xml/>".getBytes());
+            zos.closeEntry();
+        }
+        DocThreat threat = scanner.scan(docx, OOXML_MIME);
         assertThat(threat).isNotNull();
         assertThat(threat.kind()).isEqualTo(DocThreat.Kind.ACTIVE_X);
     }
@@ -49,22 +70,29 @@ class DocumentThreatScannerTest {
     @DisplayName("干净的 docx → null")
     void cleanDocx_returnsNull() throws Exception {
         Path docx = createOoxmlWithEntry("word/document.xml", "<xml/>".getBytes());
-        DocThreat threat = scanner.scan(docx);
+        DocThreat threat = scanner.scan(docx, OOXML_MIME);
         assertThat(threat).isNull();
     }
 
     @Test
-    @DisplayName("POI 生成带 AutoOpen+Shell 宏的 xls → MACRO 威胁")
-    void xlsWithSuspiciousMacro_detected() throws Exception {
-        Path xls = tempDir.resolve("macro.xls");
-        // 使用 POI 构造包含 VBA 宏的 OLE2 文件较为复杂，此处用最小 OLE2 验证扫描不崩
+    @DisplayName("非文档 MIME（text/plain）→ null（按 mime 路由，不进文档分支）")
+    void nonDocumentMime_returnsNull() throws Exception {
+        Path txt = tempDir.resolve("note.txt");
+        Files.writeString(txt, "just text");
+        assertThat(scanner.scan(txt, "text/plain")).isNull();
+    }
+
+    @Test
+    @DisplayName("无宏的良性 xls → null（POI 空宏路径不误判）")
+    void benignXlsWithoutMacro_returnsNull() throws Exception {
+        Path xls = tempDir.resolve("benign.xls");
         try (var wb = new HSSFWorkbook();
              var fos = Files.newOutputStream(xls)) {
             wb.createSheet("Sheet1");
             wb.write(fos);
         }
         // VBAMacroReader 对无宏的 HSSFWorkbook 返回空 map → null（验证良性路径不误判）
-        DocThreat threat = scanner.scan(xls);
+        DocThreat threat = scanner.scan(xls, XLS_MIME);
         assertThat(threat).isNull();
     }
 
@@ -82,7 +110,7 @@ class DocumentThreatScannerTest {
                 + "trailer\n<< /Root 1 0 R >>\n%%EOF";
         Files.writeString(pdf, content);
 
-        DocThreat threat = scanner.scan(pdf);
+        DocThreat threat = scanner.scan(pdf, PDF_MIME);
         assertThat(threat).isNotNull();
         assertThat(threat.kind()).isEqualTo(DocThreat.Kind.PDF_ACTION);
     }
@@ -98,7 +126,7 @@ class DocumentThreatScannerTest {
                 + "trailer\n<< /Root 1 0 R >>\n%%EOF";
         Files.writeString(pdf, content);
 
-        DocThreat threat = scanner.scan(pdf);
+        DocThreat threat = scanner.scan(pdf, PDF_MIME);
         assertThat(threat).isNotNull();
         assertThat(threat.kind()).isEqualTo(DocThreat.Kind.PDF_ACTION);
         assertThat(threat.description()).contains("Launch");
@@ -114,7 +142,7 @@ class DocumentThreatScannerTest {
                 + "trailer\n<< /Root 1 0 R >>\n%%EOF";
         Files.writeString(pdf, content);
 
-        DocThreat threat = scanner.scan(pdf);
+        DocThreat threat = scanner.scan(pdf, PDF_MIME);
         assertThat(threat).isNull();
     }
 

@@ -3,9 +3,12 @@ package zxf.upload.support.rest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import zxf.upload.model.exception.FileRejectedException;
 import zxf.upload.model.exception.ScanFailedException;
 import zxf.upload.model.exception.VirusDetectedException;
@@ -44,6 +47,16 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleMaxSize(MaxUploadSizeExceededException ex) {
         return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
                 .body(new ErrorResponse("FILE_TOO_LARGE", "文件超过大小限制"));
+    }
+
+    /** 缺 file part / 非 multipart 请求等客户端错误 → 400（避免落入兜底 handler 映射为 500） */
+    @ExceptionHandler({MissingServletRequestParameterException.class,
+            MissingServletRequestPartException.class,
+            MultipartException.class})
+    public ResponseEntity<ErrorResponse> handleMissingFilePart(Exception ex) {
+        log.debug("非法上传请求: {}", ex.getMessage());
+        return ResponseEntity.badRequest()
+                .body(new ErrorResponse("FILE_REJECTED", "缺少上传文件或请求格式非法"));
     }
 
     /** 兜底：未预见异常统一 500，避免容器默认错误页泄漏细节 */

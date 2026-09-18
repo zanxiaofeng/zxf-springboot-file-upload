@@ -9,7 +9,6 @@ import zxf.upload.model.exception.ScanFailedException;
 import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Semaphore;
 
@@ -51,7 +50,7 @@ public class VirusScanService {
 
     /**
      * 执行完整扫描管道。
-     * @return CLEAN 时 details 为正式存储路径；其余状态 staging 文件已被妥善处理
+     * @return CLEAN 时 details 为正式存储文件名（不含路径）；其余状态 staging 文件已被妥善处理
      */
     public ScanResult scanFile(Path stagingFile, String originalFilename) {
         try {
@@ -73,7 +72,7 @@ public class VirusScanService {
             switch (result.getStatus()) {
                 case CLEAN -> {
                     String stored = storageService.store(stagingFile, originalFilename);
-                    deleteQuietly(stagingFile);
+                    FileUtils.deleteQuietly(stagingFile);
                     log.info("Scan passed: {} -> {}", FileUtils.sanitizeForLog(originalFilename), stored);
                     return ScanResult.builder()
                             .status(ScanStatus.CLEAN)
@@ -88,7 +87,7 @@ public class VirusScanService {
                     return result;
                 }
                 default -> {
-                    deleteQuietly(stagingFile);
+                    FileUtils.deleteQuietly(stagingFile);
                     return result;
                 }
             }
@@ -99,7 +98,7 @@ public class VirusScanService {
                 try {
                     // 先入库再清理：若先 delete，store 将读不到文件
                     String stored = storageService.store(stagingFile, originalFilename);
-                    deleteQuietly(stagingFile);
+                    FileUtils.deleteQuietly(stagingFile);
                     return ScanResult.builder()
                             .status(ScanStatus.CLEAN)
                             .details(stored)
@@ -109,10 +108,10 @@ public class VirusScanService {
                     throw new ScanFailedException("fail-open 降级存储失败", ioe);
                 }
             }
-            deleteQuietly(stagingFile);
+            FileUtils.deleteQuietly(stagingFile);
             throw e;
         } catch (IOException e) {
-            deleteQuietly(stagingFile);
+            FileUtils.deleteQuietly(stagingFile);
             throw new ScanFailedException("扫描管道 IO 异常: " + e.getMessage(), e);
         }
     }
@@ -141,9 +140,9 @@ public class VirusScanService {
             return ScanResult.infected(stagingFile, yaraThreat);
         }
 
-        // 阶段 4：文档威胁（复用 mime，不重复探测）
+        // 阶段 4：文档威胁（复用 mime，按 mime 路由扫描分支）
         if (fileTypeValidator.isDocumentFormat(mime)) {
-            DocumentThreatScanner.DocThreat docThreat = documentThreatScanner.scan(stagingFile);
+            DocumentThreatScanner.DocThreat docThreat = documentThreatScanner.scan(stagingFile, mime);
             if (docThreat != null) {
                 // 宏策略分级：FLAG 放行并打标告警；ActiveX/PDF 危险动作始终拦截
                 if (docThreat.kind() == DocumentThreatScanner.DocThreat.Kind.MACRO
@@ -161,13 +160,5 @@ public class VirusScanService {
         }
 
         return ScanResult.clean(stagingFile, mime);
-    }
-
-    private void deleteQuietly(Path path) {
-        try {
-            Files.deleteIfExists(path);
-        } catch (IOException e) {
-            log.error("清理暂存文件失败: {}", path, e);
-        }
     }
 }

@@ -8,11 +8,34 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 @Data
 @Validated
 @ConfigurationProperties(prefix = "zxf.virus-scan")
 public class VirusScanProperties {
+
+    /**
+     * MIME → 主扩展名映射：允许类型的唯一数据源，
+     * allowedExtensions / allowedMimeTypes 默认值及 FileTypeValidator 的一致性校验均由此派生。
+     */
+    public static final Map<String, String> MIME_TO_PRIMARY_EXT = Map.ofEntries(
+            Map.entry("application/pdf", "pdf"),
+            Map.entry("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+            Map.entry("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
+            Map.entry("application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx"),
+            Map.entry("application/msword", "doc"),
+            Map.entry("application/vnd.ms-excel", "xls"),
+            Map.entry("application/vnd.ms-powerpoint", "ppt"),
+            Map.entry("image/jpeg", "jpg"),
+            Map.entry("image/png", "png"),
+            Map.entry("image/gif", "gif"),
+            Map.entry("image/bmp", "bmp"),
+            Map.entry("text/plain", "txt"),
+            Map.entry("text/csv", "csv"),
+            Map.entry("application/zip", "zip"));
 
     /** 总开关。false 时管道直接入库（仍执行大小/扩展名预检）。 */
     private boolean enabled = true;
@@ -48,22 +71,16 @@ public class VirusScanProperties {
     @Valid
     private ZipGuard zip = new ZipGuard();
 
-    private List<String> allowedExtensions = List.of(
-            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-            "jpg", "jpeg", "png", "gif", "bmp",
-            "txt", "csv", "zip");
+    /** 默认值由 MIME_TO_PRIMARY_EXT 派生：主扩展名 + jpg/jpeg 互认别名 */
+    private List<String> allowedExtensions = deriveDefaultExtensions();
 
-    private List<String> allowedMimeTypes = List.of(
-            "application/pdf",
-            "application/msword",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/vnd.ms-excel",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "application/vnd.ms-powerpoint",
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            "image/jpeg", "image/png", "image/gif", "image/bmp",
-            "text/plain", "text/csv",
-            "application/zip");
+    private List<String> allowedMimeTypes = List.copyOf(MIME_TO_PRIMARY_EXT.keySet());
+
+    private static List<String> deriveDefaultExtensions() {
+        Set<String> exts = new TreeSet<>(MIME_TO_PRIMARY_EXT.values());
+        exts.add("jpeg");   // jpg/jpeg 互认别名（isExtensionConsistent 特判）
+        return List.copyOf(exts);
+    }
 
     @Valid
     private ClamAv clamav = new ClamAv();

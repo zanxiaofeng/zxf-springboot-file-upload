@@ -10,7 +10,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.util.Locale;
 import java.util.UUID;
 
 @Slf4j
@@ -35,29 +34,34 @@ public class FileStorageService {
         }
     }
 
+    /**
+     * 入库并返回存储文件名（UUID.ext）。完整物理路径只进日志，
+     * 不随 ScanResult/UploadResponse 返回给客户端（防内部路径泄漏）。
+     */
     public String store(Path sourceFile, String originalFilename) throws IOException {
-        String ext = extractExtension(originalFilename);
+        String ext = FileUtils.extension(originalFilename);
         Path target = storagePath.resolve(UUID.randomUUID() + (ext.isEmpty() ? "" : "." + ext));
         Files.copy(sourceFile, target, StandardCopyOption.REPLACE_EXISTING);
         log.info("File stored: {} -> {}", FileUtils.sanitizeForLog(originalFilename), target);
-        return target.toAbsolutePath().toString();
+        return target.getFileName().toString();
     }
 
     public void moveToQuarantine(Path file) {
+        // 隔离文件重命名为 UUID，防止原名冲突与路径信息泄漏
+        Path target = quarantinePath.resolve(UUID.randomUUID() + ".quarantined");
         try {
-            // 隔离文件重命名为 UUID，防止原名冲突与路径信息泄漏
-            Path target = quarantinePath.resolve(UUID.randomUUID() + ".quarantined");
             Files.move(file, target, StandardCopyOption.REPLACE_EXISTING);
-            log.info("File quarantined: {} -> {}", file.getFileName(), target.getFileName());
         } catch (IOException e) {
-            log.error("移入隔离区失败: {}", file, e);
+            // move 失败（如 staging 与隔离区跨文件系统）降级 copy+delete，
+            // 确保威胁文件不滞留 staging；仍失败则只能记录（文件留在 staging）
+            try {
+                Files.copy(file, target, StandardCopyOption.REPLACE_EXISTING);
+                Files.delete(file);
+            } catch (IOException fallbackError) {
+                log.error("移入隔离区失败，文件滞留 staging: {}", file, fallbackError);
+                return;
+            }
         }
-    }
-
-    private String extractExtension(String filename) {
-        if (filename == null || !filename.contains(".")) {
-            return "";
-        }
-        return filename.substring(filename.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
+        log.info("File quarantined: {} -> {}", file.getFileName(), target.getFileName());
     }
 }

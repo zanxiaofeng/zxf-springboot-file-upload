@@ -7,13 +7,15 @@ import org.apache.tika.Tika;
 import org.springframework.stereotype.Component;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.ScanFailedException;
+import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
-import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 文件类型校验：Tika 探测一次，detectedMime 随返回值传递到后续管道阶段。
@@ -21,27 +23,17 @@ import java.util.Map;
 @Slf4j
 @Component
 public class FileTypeValidator {
-    private static final Map<String, String> MIME_TO_PRIMARY_EXT = Map.ofEntries(
-            Map.entry("application/pdf", "pdf"),
-            Map.entry("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
-            Map.entry("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
-            Map.entry("application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx"),
-            Map.entry("application/msword", "doc"),
-            Map.entry("application/vnd.ms-excel", "xls"),
-            Map.entry("application/vnd.ms-powerpoint", "ppt"),
-            Map.entry("image/jpeg", "jpg"),
-            Map.entry("image/png", "png"),
-            Map.entry("image/gif", "gif"),
-            Map.entry("image/bmp", "bmp"),
-            Map.entry("text/plain", "txt"),
-            Map.entry("text/csv", "csv"),
-            Map.entry("application/zip", "zip"));
 
     private final VirusScanProperties properties;
     private final Tika tika = new Tika();
+    /** 小写化快照：探测结果小写后 O(1) 匹配，避免每请求线性扫描 */
+    private final Set<String> allowedMimeTypes;
 
     public FileTypeValidator(VirusScanProperties properties) {
         this.properties = properties;
+        this.allowedMimeTypes = properties.getAllowedMimeTypes().stream()
+                .map(mime -> mime.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     /** 校验结果。detectedMime 供管道后续阶段复用。 */
@@ -55,10 +47,10 @@ public class FileTypeValidator {
             throw new ScanFailedException("文件类型探测失败: " + e.getMessage(), e);
         }
 
-        String extension = extractExtension(originalFilename);
+        String extension = FileUtils.extension(originalFilename);
         log.debug("Type check: filename={}, ext={}, detected={}", originalFilename, extension, detectedMime);
 
-        if (properties.getAllowedMimeTypes().stream().noneMatch(detectedMime::equalsIgnoreCase)) {
+        if (!allowedMimeTypes.contains(detectedMime.toLowerCase(Locale.ROOT))) {
             return new TypeCheck(false, detectedMime, "不支持的文件类型: " + detectedMime);
         }
         if (!isExtensionConsistent(detectedMime, extension)) {
@@ -88,7 +80,7 @@ public class FileTypeValidator {
         if ("text/plain".equals(mimeType)) {
             return "txt".equals(extension) || "csv".equals(extension);
         }
-        String expected = MIME_TO_PRIMARY_EXT.get(mimeType);
+        String expected = VirusScanProperties.MIME_TO_PRIMARY_EXT.get(mimeType);
         if (expected != null) {
             return expected.equals(extension);
         }
@@ -98,13 +90,16 @@ public class FileTypeValidator {
     /**
      * 流式 ZIP 检查（OWASP 解压炸弹防护）：
      * - 条目总数上限（海量空 entry 炸弹，遍历本身即 DoS 向量）；
-     * - 单 entry 解压大小上限；
-     * - getSize() 返回 -1 时按实际读取字节计数（边读边校验，超限即中断）；
-     * - 累计解压总量绝对上限；
-     * - 压缩比上限。
+     * - 单 entry 实际解压大小上限；
+     * - 累计实际解压总量绝对上限；
+     * - 实际解压总量 / 压缩文件大小的压缩比上限。
      *
-     * 不递归解压：内层 .zip 条目不展开检查（其条目大小仍计入压缩比与
-     * 累计总量预算），嵌套内容的威胁检测由 ClamAV/YARA 对原始字节扫描兜底。
+     * header 声明的大小完全由攻击者可控，一律不信任：所有 entry 均实际解压
+     * 读取并逐字节计数，超限即时中断（声明的 size 与实际不符会导致流错位、
+     * 后续 header 解析失败，同样走 fail-closed 拒绝）。
+     *
+     * 不递归解压：内层 .zip 条目不展开检查，嵌套内容的威胁检测由
+     * ClamAV/YARA 对原始字节扫描兜底。
      *
      * @return null = 通过；非 null = 拒绝原因
      */
@@ -127,36 +122,25 @@ public class FileTypeValidator {
                 if (++entryCount > guard.getMaxEntries()) {
                     return "疑似 ZIP 炸弹，条目数超过 " + guard.getMaxEntries();
                 }
-                long entrySize = entry.getSize();
-                if (entrySize >= 0) {
-                    if (entrySize > guard.getMaxEntryUncompressed()) {
+                // 实际解压计数：单 entry 与累计超限均即时中断
+                long entryBytes = 0;
+                int n;
+                while ((n = archive.read(buffer)) != -1) {
+                    entryBytes += n;
+                    if (entryBytes > guard.getMaxEntryUncompressed()) {
                         return singleEntryBombMessage(guard);
                     }
-                    totalUncompressed += entrySize;
-                } else {
-                    // 未知大小：实际读取计数，单 entry 与累计超限均即时中断
-                    long entryBytes = 0;
-                    int n;
-                    while ((n = archive.read(buffer)) != -1) {
-                        entryBytes += n;
-                        if (entryBytes > guard.getMaxEntryUncompressed()) {
-                            return singleEntryBombMessage(guard);
-                        }
-                        totalUncompressed += n;
-                        if (totalUncompressed > guard.getMaxTotalUncompressed()) {
-                            return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
-                        }
+                    totalUncompressed += n;
+                    if (totalUncompressed > guard.getMaxTotalUncompressed()) {
+                        return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
                     }
-                }
-                if (totalUncompressed > guard.getMaxTotalUncompressed()) {
-                    return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
                 }
                 if (compressedSize > 0 && totalUncompressed > compressedSize * guard.getMaxCompressionRatio()) {
                     return "疑似 ZIP 炸弹，压缩比超过 " + guard.getMaxCompressionRatio() + ":1";
                 }
             }
         } catch (IOException e) {
-            // 损坏的 zip 交由 ClamAV/YARA 判定；此处异常按引擎故障上抛
+            // 损坏的 zip 或声明值与实际不符（流错位）按引擎故障上抛，fail-closed 拒绝
             throw new ScanFailedException("ZIP 检查失败: " + e.getMessage(), e);
         }
         return null;
@@ -164,12 +148,5 @@ public class FileTypeValidator {
 
     private String singleEntryBombMessage(VirusScanProperties.ZipGuard guard) {
         return "疑似 ZIP 炸弹，单文件解压大小超过 " + (guard.getMaxEntryUncompressed() >> 20) + "MB";
-    }
-
-    private String extractExtension(String filename) {
-        if (filename == null || !filename.contains(".")) {
-            return "";
-        }
-        return filename.substring(filename.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
     }
 }

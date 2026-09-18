@@ -19,7 +19,7 @@ import zxf.upload.service.StagingService;
 import zxf.upload.service.VirusScanService;
 
 import java.nio.file.Path;
-import java.util.Set;
+import java.util.Locale;
 import java.util.UUID;
 
 @Slf4j
@@ -27,13 +27,14 @@ import java.util.UUID;
 @RequestMapping("/api/files")
 @RequiredArgsConstructor
 public class FileUploadController {
+
+    /** SSE 连接超时；需低于 AsyncScanProcessor 中 pendingEmitters 的 TTL（10 分钟） */
+    private static final long SSE_EMITTER_TIMEOUT_MS = 300_000L;
+
     private final StagingService stagingService;
     private final VirusScanService scanService;
     private final AsyncScanProcessor asyncProcessor;
     private final VirusScanProperties properties;
-
-    private static final Set<String> TRUE_VALUES = Set.of("true", "on", "yes", "1");
-    private static final Set<String> FALSE_VALUES = Set.of("false", "off", "no", "0");
 
     @PostMapping("/upload")
     public ResponseEntity<UploadResponse> upload(
@@ -79,20 +80,18 @@ public class FileUploadController {
         if (value == null || value.isBlank()) {
             return false;
         }
-        String normalized = value.trim();
-        for (String t : TRUE_VALUES) {
-            if (t.equalsIgnoreCase(normalized)) return true;
-        }
-        for (String f : FALSE_VALUES) {
-            if (f.equalsIgnoreCase(normalized)) return false;
-        }
-        throw new FileRejectedException("X-Scan-Async 请求头取值非法: " + normalized);
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "true", "on", "yes", "1" -> true;
+            case "false", "off", "no", "0" -> false;
+            default -> throw new FileRejectedException("X-Scan-Async 请求头取值非法: " + normalized);
+        };
     }
 
     /** SSE 推送（增强通道） */
     @GetMapping(value = "/scan/{scanId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter scanEvents(@PathVariable String scanId) {
-        SseEmitter emitter = new SseEmitter(300_000L);
+        SseEmitter emitter = new SseEmitter(SSE_EMITTER_TIMEOUT_MS);
         asyncProcessor.registerEmitter(scanId, emitter);
         return emitter;
     }

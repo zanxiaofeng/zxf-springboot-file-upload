@@ -48,18 +48,24 @@ public class DocumentThreatScanner {
     }
 
     /**
+     * @param mimeType Tika 探测的 MIME（管道复用值）。按内容探测结果路由扫描分支，
+     *                 不依赖客户端可控的文件名扩展名
      * @return null = 干净/非文档；非 null = 威胁检出
      */
-    public DocThreat scan(Path file) {
-        String filename = file.getFileName().toString().toLowerCase(Locale.ROOT);
+    public DocThreat scan(Path file, String mimeType) {
+        if (mimeType == null) {
+            return null;
+        }
         try {
-            if (filename.endsWith(".docx") || filename.endsWith(".xlsx") || filename.endsWith(".pptx")) {
+            if (mimeType.startsWith("application/vnd.openxmlformats-officedocument.")) {
                 return scanOoxml(file);
             }
-            if (filename.endsWith(".doc") || filename.endsWith(".xls") || filename.endsWith(".ppt")) {
+            if (mimeType.equals("application/msword")
+                    || mimeType.equals("application/vnd.ms-excel")
+                    || mimeType.equals("application/vnd.ms-powerpoint")) {
                 return scanOle2(file);
             }
-            if (filename.endsWith(".pdf")) {
+            if (mimeType.equals("application/pdf")) {
                 return scanPdf(file);
             }
             return null;
@@ -85,13 +91,15 @@ public class DocumentThreatScanner {
                     hasActiveX = true;
                 }
             }
-            if (hasVba) {
-                log.warn("OOXML contains VBA project: {}", file.getFileName());
-                return new DocThreat("Office 文档包含 VBA 宏", DocThreat.Kind.MACRO);
-            }
+            // ActiveX 先于 VBA 判定：两者并存时若 VBA 先命中，FLAG 策略会将其放行，
+            // 导致"ActiveX 始终拦截"被绕过
             if (hasActiveX) {
                 log.warn("OOXML contains ActiveX controls: {}", file.getFileName());
                 return new DocThreat("Office 文档包含 ActiveX 控件", DocThreat.Kind.ACTIVE_X);
+            }
+            if (hasVba) {
+                log.warn("OOXML contains VBA project: {}", file.getFileName());
+                return new DocThreat("Office 文档包含 VBA 宏", DocThreat.Kind.MACRO);
             }
             return null;
         }

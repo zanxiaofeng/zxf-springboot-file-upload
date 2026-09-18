@@ -33,9 +33,15 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Service
 public class AsyncScanProcessor {
+
+    /** pendingEmitters TTL：需高于 SSE emitter 超时（Controller 300s），保证 emitter 超时前仍在缓存内可被心跳清理 */
+    private static final long PENDING_EMITTER_TTL_MINUTES = 10;
+    private static final long PENDING_EMITTER_MAX_SIZE = 10_000;
+    private static final long COMPLETED_SCAN_MAX_SIZE = 100_000;
+
     private final VirusScanService scanService;
 
-    /** SSE 连接等待中的 emitter；TTL 略高于 emitter 超时（300s），正常路径由 onCompletion/onTimeout 移除 */
+    /** SSE 连接等待中的 emitter，正常路径由 onCompletion/onTimeout 移除 */
     private final Cache<String, SseEmitter> pendingEmitters;
     /** 已完成扫描结果，供 SSE 回放与轮询兜底 */
     private final Cache<String, UploadResponse> completedScans;
@@ -44,12 +50,12 @@ public class AsyncScanProcessor {
         this.scanService = scanService;
         long retention = properties.getResultRetentionMinutes();
         this.pendingEmitters = Caffeine.newBuilder()
-                .expireAfterWrite(10, TimeUnit.MINUTES)
-                .maximumSize(10_000)
+                .expireAfterWrite(PENDING_EMITTER_TTL_MINUTES, TimeUnit.MINUTES)
+                .maximumSize(PENDING_EMITTER_MAX_SIZE)
                 .build();
         this.completedScans = Caffeine.newBuilder()
                 .expireAfterWrite(retention, TimeUnit.MINUTES)
-                .maximumSize(100_000)
+                .maximumSize(COMPLETED_SCAN_MAX_SIZE)
                 .build();
     }
 
@@ -69,7 +75,8 @@ public class AsyncScanProcessor {
             try {
                 emitter.send(SseEmitter.event().comment("hb"));
             } catch (Exception e) {
-                pendingEmitters.asMap().remove(scanId);
+                // 两参 remove：只摘当前 emitter，避免误删同 scanId 重连后的新 emitter
+                pendingEmitters.asMap().remove(scanId, emitter);
                 log.debug("SSE 心跳发送失败，移除 emitter: {}", scanId);
             }
         });
@@ -97,7 +104,9 @@ public class AsyncScanProcessor {
             emitter.send(SseEmitter.event().name(eventName(done.getStatus())).data(done));
             emitter.complete();
         } catch (IOException e) {
+            // complete 有 sendFailed 守卫，send 失败后调用安全：显式结束连接，避免客户端挂到超时
             log.warn("SSE 回放失败: {}", scanId, e);
+            emitter.complete();
         }
     }
 
@@ -123,6 +132,7 @@ public class AsyncScanProcessor {
                 emitter.complete();
             } catch (IOException e) {
                 log.warn("SSE 推送失败（结果已缓存，客户端可轮询）: {}", scanId, e);
+                emitter.complete();
             }
         }
     }

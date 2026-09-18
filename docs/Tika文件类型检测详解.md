@@ -173,7 +173,7 @@ Tika（门面）
 
 ## 七、在本项目中：FileTypeValidator 解读
 
-`FileTypeValidator.validate()` 做三件事，层层递进：
+`FileTypeValidator.validate()` 四步层层递进：
 
 ```java
 // 1. 探测一次，结果随管道传递（后续文档威胁检测复用，不重复探测）

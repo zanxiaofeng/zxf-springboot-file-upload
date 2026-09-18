@@ -40,7 +40,9 @@ zxf-springboot-file-upload/
 │   │   ├── ScanStatus.java
 │   │   ├── ScanResult.java
 │   │   ├── UploadResponse.java
+│   │   ├── ErrorCode.java                           # 业务错误码枚举（预留，当前 Handler 未接线）
 │   │   └── exception/
+│   │       ├── BusinessException.java               # 业务异常基类（预留，当前无子类）
 │   │       ├── FileRejectedException.java           # 400
 │   │       ├── VirusDetectedException.java          # 422
 │   │       └── ScanFailedException.java             # 502
@@ -55,6 +57,8 @@ zxf-springboot-file-upload/
 │   │   └── AsyncScanProcessor.java                  # 异步扫描 + SSE + 结果缓存（Caffeine TTL）
 │   └── support/
 │       ├── ClamAvHealthIndicator.java               # ClamAV PING 健康检查（/actuator/health）
+│       ├── io/
+│       │   └── FileUtils.java                       # 静默删除/扩展名提取/日志净化工具
 │       └── rest/
 │           └── GlobalExceptionHandler.java
 ├── src/main/resources/
@@ -67,7 +71,9 @@ zxf-springboot-file-upload/
     ├── service/DocumentThreatScannerTest.java
     ├── service/ClamAvScannerTest.java
     ├── service/StagingServiceTest.java
+    ├── service/FileStorageServiceTest.java
     ├── service/YaraScannerTest.java
+    ├── service/AsyncScanProcessorTest.java
     ├── support/ClamAvHealthIndicatorTest.java
     └── control/FileUploadControllerTest.java
 ```
@@ -168,8 +174,6 @@ zxf-springboot-file-upload/
 </dependencies>
 ```
 
-```
-
 > **maven-compiler-plugin 3.12+ 注意**：默认不再从 classpath 自动发现注解处理器，必须显式声明 `annotationProcessorPaths`，否则 Lombok 不生效（编译通过但运行时 `Unresolved compilation problem`）：
 >
 > ```xml
@@ -245,7 +249,7 @@ import java.nio.file.Path;
  * 扫描结果，不可变。
  * stagingPath：管道内暂存文件路径，所有状态均携带，供管道统一清理/隔离。
  * detectedMime：Tika 探测结果，随管道传递避免重复探测。
- * CLEAN 状态下 details 携带正式存储路径。
+ * CLEAN 状态下 details 携带正式存储文件名（不含路径，防内部路径外泄）。
  */
 @Value
 @Builder
@@ -333,6 +337,62 @@ public class UploadResponse {
 ### 异常类
 
 ```java
+package zxf.upload.model;
+
+import lombok.Getter;
+import org.springframework.http.HttpStatus;
+
+/**
+ * 业务错误码。统一维护错误标识、HTTP 状态码与默认对外消息，避免在 Handler 中硬编码。
+ */
+@Getter
+public enum ErrorCode {
+    FILE_REJECTED("FILE_REJECTED", HttpStatus.BAD_REQUEST, "文件被拒绝"),
+    VIRUS_DETECTED("VIRUS_DETECTED", HttpStatus.UNPROCESSABLE_ENTITY, "检测到威胁"),
+    SCAN_ENGINE_ERROR("SCAN_ENGINE_ERROR", HttpStatus.BAD_GATEWAY, "扫描引擎暂时不可用，请稍后重试"),
+    FILE_TOO_LARGE("FILE_TOO_LARGE", HttpStatus.PAYLOAD_TOO_LARGE, "文件超过大小限制"),
+    INTERNAL_ERROR("INTERNAL_ERROR", HttpStatus.INTERNAL_SERVER_ERROR, "服务器内部错误");
+
+    private final String code;
+    private final HttpStatus status;
+    private final String defaultMessage;
+
+    ErrorCode(String code, HttpStatus status, String defaultMessage) {
+        this.code = code;
+        this.status = status;
+        this.defaultMessage = defaultMessage;
+    }
+}
+```
+
+```java
+package zxf.upload.model.exception;
+
+import lombok.Getter;
+import zxf.upload.model.ErrorCode;
+
+/**
+ * 业务异常基类。所有业务语义异常均继承此类，便于全局异常处理器统一映射错误码。
+ */
+@Getter
+public abstract class BusinessException extends RuntimeException {
+    private final ErrorCode errorCode;
+
+    protected BusinessException(ErrorCode errorCode, String message) {
+        super(message);
+        this.errorCode = errorCode;
+    }
+
+    protected BusinessException(ErrorCode errorCode, String message, Throwable cause) {
+        super(message, cause);
+        this.errorCode = errorCode;
+    }
+}
+```
+
+> 注：`ErrorCode` 与 `BusinessException` 为预留设计，当前 `GlobalExceptionHandler` 直接硬编码错误码字符串，三个业务异常也未继承基类——保留作后续接线之用。
+
+```java
 package zxf.upload.model.exception;
 
 /** 策略拒绝（400）：文件过大、类型不符、ZIP 炸弹 */
@@ -386,11 +446,34 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 @Data
 @Validated
 @ConfigurationProperties(prefix = "zxf.virus-scan")
 public class VirusScanProperties {
+
+    /**
+     * MIME → 主扩展名映射：允许类型的唯一数据源，
+     * allowedExtensions / allowedMimeTypes 默认值及 FileTypeValidator 的一致性校验均由此派生。
+     */
+    public static final Map<String, String> MIME_TO_PRIMARY_EXT = Map.ofEntries(
+            Map.entry("application/pdf", "pdf"),
+            Map.entry("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+            Map.entry("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
+            Map.entry("application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx"),
+            Map.entry("application/msword", "doc"),
+            Map.entry("application/vnd.ms-excel", "xls"),
+            Map.entry("application/vnd.ms-powerpoint", "ppt"),
+            Map.entry("image/jpeg", "jpg"),
+            Map.entry("image/png", "png"),
+            Map.entry("image/gif", "gif"),
+            Map.entry("image/bmp", "bmp"),
+            Map.entry("text/plain", "txt"),
+            Map.entry("text/csv", "csv"),
+            Map.entry("application/zip", "zip"));
 
     /** 总开关。false 时管道直接入库（仍执行大小/扩展名预检）。 */
     private boolean enabled = true;
@@ -426,22 +509,16 @@ public class VirusScanProperties {
     @Valid
     private ZipGuard zip = new ZipGuard();
 
-    private List<String> allowedExtensions = List.of(
-            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-            "jpg", "jpeg", "png", "gif", "bmp",
-            "txt", "csv", "zip");
+    /** 默认值由 MIME_TO_PRIMARY_EXT 派生：主扩展名 + jpg/jpeg 互认别名 */
+    private List<String> allowedExtensions = deriveDefaultExtensions();
 
-    private List<String> allowedMimeTypes = List.of(
-            "application/pdf",
-            "application/msword",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/vnd.ms-excel",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "application/vnd.ms-powerpoint",
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            "image/jpeg", "image/png", "image/gif", "image/bmp",
-            "text/plain", "text/csv",
-            "application/zip");
+    private List<String> allowedMimeTypes = List.copyOf(MIME_TO_PRIMARY_EXT.keySet());
+
+    private static List<String> deriveDefaultExtensions() {
+        Set<String> exts = new TreeSet<>(MIME_TO_PRIMARY_EXT.values());
+        exts.add("jpeg");   // jpg/jpeg 互认别名（isExtensionConsistent 特判）
+        return List.copyOf(exts);
+    }
 
     @Valid
     private ClamAv clamav = new ClamAv();
@@ -460,8 +537,6 @@ public class VirusScanProperties {
         private long maxCompressionRatio = 100L;
         /** 累计解压字节上限（默认 1GB） */
         private long maxTotalUncompressed = 1L << 30;
-        /** 嵌套压缩包最大深度 */
-        private int maxNestingDepth = 2;
         /** 条目总数上限（防海量空 entry 炸弹：遍历本身即 DoS 向量） */
         private long maxEntries = 10_000L;
         /** 单 entry 解压后大小上限（默认 100MB，与 maxFileSize 对齐） */
@@ -473,6 +548,9 @@ public class VirusScanProperties {
         @NotBlank
         private String host = "localhost";
         private int port = 3310;
+        /** 单次扫描/socket 等待超时（秒）：capybara 2.1.2 无 socket 超时，超时计为熔断失败 */
+        @Min(1)
+        private long timeoutSeconds = 60;
     }
 
     @Data
@@ -529,6 +607,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.FileRejectedException;
+import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -572,9 +651,7 @@ public class StagingService {
                     + properties.getMaxFileSize() / 1024 / 1024 + "MB");
         }
         String original = file.getOriginalFilename();
-        String ext = (original != null && original.contains("."))
-                ? original.substring(original.lastIndexOf('.') + 1).toLowerCase()
-                : "";
+        String ext = FileUtils.extension(original);
         // 扩展名预检（快路径，内容防伪由 Tika 负责）
         if (!ext.isEmpty() && !properties.getAllowedExtensions().contains(ext)) {
             throw new FileRejectedException("不支持的文件扩展名: " + ext);
@@ -584,15 +661,17 @@ public class StagingService {
         try (InputStream in = file.getInputStream()) {
             Files.copy(in, stagingFile, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
-            // 落盘失败（磁盘满/IO 错误）时清理残留的不完整文件
+            // 落盘失败（磁盘满/IO 错误）时清理残留的不完整文件；
+            // 异常细节（含内部路径）只进日志，对外通用文案
             try {
                 Files.deleteIfExists(stagingFile);
             } catch (IOException cleanupError) {
                 log.warn("清理失败的暂存文件失败: {}", stagingFile, cleanupError);
             }
-            throw new FileRejectedException("文件暂存失败: " + e.getMessage());
+            log.error("文件暂存失败: {}", stagingFile, e);
+            throw new FileRejectedException("文件暂存失败，请稍后重试");
         }
-        log.debug("File staged: {} -> {}", original, stagingFile);
+        log.debug("File staged: {} -> {}", FileUtils.sanitizeForLog(original), stagingFile);
         return stagingFile;
     }
 }
@@ -620,6 +699,12 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 /**
@@ -627,28 +712,34 @@ import java.util.stream.Collectors;
  * 调用方只接收 String threat / null，避免类型耦合。
  * 引擎故障抛 ScanFailedException，由管道按 fail-strategy 处理。
  *
- * 熔断保护：capybara 2.1.2 无 socket 超时配置，ClamAV 挂起时扫描线程会
- * 长时间阻塞。熔断器在失败率超阈值后快速失败（不再触碰引擎），
- * 防止故障级联耗尽信号量许可导致全服务不可用。
+ * 熔断 + 超时保护：capybara 2.1.2 无 socket 超时配置，ClamAV 挂起时调用线程会
+ * 永久阻塞在 socket read 上——且挂起的调用既不成功也不失败，熔断器只统计已结束
+ * 的调用，永远不会因此打开。故实际扫描提交到虚拟线程限时等待（见 scanWithTimeout）：
+ * 超时即抛 ScanFailedException，既及时释放调用线程（不耗尽信号量许可），
+ * 又计入熔断失败率，持续超时后熔断打开快速失败，防止故障级联导致全服务不可用。
  */
 @Slf4j
 @Component
 public class ClamAvScanner {
     private final ClamavClient client;
     private final CircuitBreaker circuitBreaker;
+    private final long timeoutSeconds;
+    /** 执行 socket IO 的线程池（每任务一个虚拟线程，被放弃的挂起任务阻塞成本极低） */
+    private final ExecutorService scanExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public ClamAvScanner(VirusScanProperties properties) {
-        this(createClient(properties.getClamav()));
+        this(createClient(properties.getClamav()), properties.getClamav().getTimeoutSeconds());
     }
 
-    /** capybara 2.1.2 构造器不支持 socket timeout 配置（ClamAV 挂起时依赖熔断器兜底） */
+    /** capybara 2.1.2 构造器不支持 socket timeout 配置（挂起防护见类注释） */
     private static ClamavClient createClient(VirusScanProperties.ClamAv cfg) {
         return new ClamavClient(cfg.getHost(), cfg.getPort(), Platform.JVM_PLATFORM);
     }
 
     /** 包私有构造：测试注入 mock client */
-    ClamAvScanner(ClamavClient client) {
+    ClamAvScanner(ClamavClient client, long timeoutSeconds) {
         this.client = client;
+        this.timeoutSeconds = timeoutSeconds;
         this.circuitBreaker = CircuitBreaker.of("clamav", CircuitBreakerConfig.custom()
                 .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
                 .slidingWindowSize(10)
@@ -661,19 +752,57 @@ public class ClamAvScanner {
 
     /**
      * @return null = 干净；非 null = 病毒描述
-     * @throws ScanFailedException ClamAV 服务不可达/协议错误/熔断中
+     * @throws ScanFailedException ClamAV 服务不可达/协议错误/超时/熔断中
      */
     public String scan(Path file) {
         try {
-            return circuitBreaker.executeSupplier(() -> doScan(file));
+            return circuitBreaker.executeSupplier(() -> scanWithTimeout(file));
         } catch (CallNotPermittedException e) {
             throw new ScanFailedException("ClamAV 熔断中，扫描暂时不可用", e);
         }
     }
 
-    /** Actuator 健康检查使用（PING/PONG） */
+    /** Actuator 健康检查使用（PING/PONG），同样限时防挂起 */
     public void ping() {
-        client.ping();
+        Future<?> ping = scanExecutor.submit(client::ping);
+        try {
+            ping.get(timeoutSeconds, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            ping.cancel(true);
+            throw new IllegalStateException("ClamAV ping 超时", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new IllegalStateException("ClamAV ping 失败: " + cause.getMessage(), cause);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("ClamAV ping 被中断", e);
+        }
+    }
+
+    /**
+     * 限时执行：超时抛 ScanFailedException（计入熔断失败率）。被放弃的虚拟线程
+     * 阻塞在 socket read 上不可中断，等待 TCP 超时/服务端关闭连接时自然回收。
+     */
+    private String scanWithTimeout(Path file) {
+        Future<String> task = scanExecutor.submit(() -> doScan(file));
+        try {
+            return task.get(timeoutSeconds, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            task.cancel(true);
+            throw new ScanFailedException("ClamAV 扫描超时(" + timeoutSeconds + "s): " + file.getFileName(), e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof ScanFailedException failure) {
+                throw failure;
+            }
+            throw new ScanFailedException("ClamAV 扫描失败: " + cause.getMessage(), cause);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ScanFailedException("ClamAV 扫描被中断", e);
+        }
     }
 
     private String doScan(Path file) {
@@ -717,7 +846,12 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -725,6 +859,10 @@ import java.util.stream.Collectors;
 public class YaraScanner {
     private final VirusScanProperties.Yara config;
     private final String rulesPath;
+    /** 读 yara 输出的线程池（每任务一个虚拟线程），与调用线程解耦，防挂起时无限阻塞 */
+    private final ExecutorService outputReader = Executors.newVirtualThreadPerTaskExecutor();
+    /** 进程正常退出后排空 stdout 的宽限时长（秒） */
+    private static final long OUTPUT_DRAIN_GRACE_SECONDS = 5;
 
     public YaraScanner(VirusScanProperties properties) {
         this.config = properties.getYara();
@@ -749,22 +887,22 @@ public class YaraScanner {
                 file.toAbsolutePath().toString());
 
         Process process = null;
+        Future<List<String>> outputFuture = null;
         try {
-            process = new ProcessBuilder(command).redirectErrorStream(true).start();
+            Process started = new ProcessBuilder(command).redirectErrorStream(true).start();
+            process = started;
 
-            List<String> output = new ArrayList<>();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.add(line);
-                }
-            }
+            // 输出读取移入虚拟线程：若在调用线程同步读，yara 挂起且不关闭 stdout 时
+            // readLine() 会永久阻塞，waitFor 的超时检查永远执行不到，最终耗尽扫描许可。
+            // 进程被 destroyForcibly 后管道关闭，读线程的 readLine() 返回 null 自然退出。
+            outputFuture = outputReader.submit(() -> readOutput(started));
 
             if (!process.waitFor(config.getTimeoutSeconds(), TimeUnit.SECONDS)) {
-                process.destroyForcibly();
                 throw new ScanFailedException("YARA 扫描超时: " + file.getFileName());
             }
+
+            // 进程已退出，输出应立即排空；宽限超时说明 stdout 被子进程继承未关闭
+            List<String> output = outputFuture.get(OUTPUT_DRAIN_GRACE_SECONDS, TimeUnit.SECONDS);
 
             // yara CLI：退出码 0 = 执行成功（无论是否命中）；非 0 = 执行错误。
             // 命中与否以输出是否为空判断。
@@ -790,11 +928,30 @@ public class YaraScanner {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new ScanFailedException("YARA 扫描被中断", e);
+        } catch (ExecutionException e) {
+            throw new ScanFailedException("YARA 输出读取失败: " + e.getCause().getMessage(), e.getCause());
+        } catch (TimeoutException e) {
+            if (outputFuture != null) {
+                outputFuture.cancel(true);
+            }
+            throw new ScanFailedException("YARA 输出排空超时: " + file.getFileName(), e);
         } finally {
             if (process != null && process.isAlive()) {
                 process.destroyForcibly();
             }
         }
+    }
+
+    private List<String> readOutput(Process process) throws IOException {
+        List<String> output = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.add(line);
+            }
+        }
+        return output;
     }
 
     private String resolveRulesPath(String rulesPath) {
@@ -833,13 +990,15 @@ import org.apache.tika.Tika;
 import org.springframework.stereotype.Component;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.exception.ScanFailedException;
+import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
-import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 文件类型校验：Tika 探测一次，detectedMime 随返回值传递到后续管道阶段。
@@ -847,26 +1006,17 @@ import java.util.Map;
 @Slf4j
 @Component
 public class FileTypeValidator {
-    private static final Map<String, String> MIME_TO_PRIMARY_EXT = Map.ofEntries(
-            Map.entry("application/pdf", "pdf"),
-            Map.entry("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
-            Map.entry("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
-            Map.entry("application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx"),
-            Map.entry("application/msword", "doc"),
-            Map.entry("application/vnd.ms-excel", "xls"),
-            Map.entry("application/vnd.ms-powerpoint", "ppt"),
-            Map.entry("image/jpeg", "jpg"),
-            Map.entry("image/png", "png"),
-            Map.entry("image/gif", "gif"),
-            Map.entry("image/bmp", "bmp"),
-            Map.entry("text/plain", "txt"),
-            Map.entry("application/zip", "zip"));
 
     private final VirusScanProperties properties;
     private final Tika tika = new Tika();
+    /** 小写化快照：探测结果小写后 O(1) 匹配，避免每请求线性扫描 */
+    private final Set<String> allowedMimeTypes;
 
     public FileTypeValidator(VirusScanProperties properties) {
         this.properties = properties;
+        this.allowedMimeTypes = properties.getAllowedMimeTypes().stream()
+                .map(mime -> mime.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     /** 校验结果。detectedMime 供管道后续阶段复用。 */
@@ -880,17 +1030,17 @@ public class FileTypeValidator {
             throw new ScanFailedException("文件类型探测失败: " + e.getMessage(), e);
         }
 
-        String extension = extractExtension(originalFilename);
+        String extension = FileUtils.extension(originalFilename);
         log.debug("Type check: filename={}, ext={}, detected={}", originalFilename, extension, detectedMime);
 
-        if (properties.getAllowedMimeTypes().stream().noneMatch(detectedMime::equalsIgnoreCase)) {
+        if (!allowedMimeTypes.contains(detectedMime.toLowerCase(Locale.ROOT))) {
             return new TypeCheck(false, detectedMime, "不支持的文件类型: " + detectedMime);
         }
         if (!isExtensionConsistent(detectedMime, extension)) {
             return new TypeCheck(false, detectedMime, "文件类型与扩展名不符，检测到: " + detectedMime);
         }
         if ("application/zip".equals(detectedMime)) {
-            String zipProblem = inspectZip(file, 1);
+            String zipProblem = inspectZip(file);
             if (zipProblem != null) {
                 return new TypeCheck(false, detectedMime, zipProblem);
             }
@@ -913,7 +1063,7 @@ public class FileTypeValidator {
         if ("text/plain".equals(mimeType)) {
             return "txt".equals(extension) || "csv".equals(extension);
         }
-        String expected = MIME_TO_PRIMARY_EXT.get(mimeType);
+        String expected = VirusScanProperties.MIME_TO_PRIMARY_EXT.get(mimeType);
         if (expected != null) {
             return expected.equals(extension);
         }
@@ -921,20 +1071,23 @@ public class FileTypeValidator {
     }
 
     /**
-     * 流式 ZIP 检查（OWASP 解压炸弹防护五维度）：
+     * 流式 ZIP 检查（OWASP 解压炸弹防护）：
      * - 条目总数上限（海量空 entry 炸弹，遍历本身即 DoS 向量）；
-     * - 单 entry 解压大小上限；
-     * - getSize() 返回 -1 时按实际读取字节计数（边读边校验，超限即中断）；
-     * - 累计解压总量绝对上限；
-     * - 压缩比上限 + 嵌套压缩包深度限制（递归炸弹）。
+     * - 单 entry 实际解压大小上限；
+     * - 累计实际解压总量绝对上限；
+     * - 实际解压总量 / 压缩文件大小的压缩比上限。
+     *
+     * header 声明的大小完全由攻击者可控，一律不信任：所有 entry 均实际解压
+     * 读取并逐字节计数，超限即时中断（声明的 size 与实际不符会导致流错位、
+     * 后续 header 解析失败，同样走 fail-closed 拒绝）。
+     *
+     * 不递归解压：内层 .zip 条目不展开检查，嵌套内容的威胁检测由
+     * ClamAV/YARA 对原始字节扫描兜底。
      *
      * @return null = 通过；非 null = 拒绝原因
      */
-    private String inspectZip(Path file, int depth) {
+    private String inspectZip(Path file) {
         VirusScanProperties.ZipGuard guard = properties.getZip();
-        if (depth > guard.getMaxNestingDepth()) {
-            return "疑似嵌套 ZIP 炸弹，压缩包嵌套深度超过 " + guard.getMaxNestingDepth();
-        }
         long compressedSize;
         try {
             compressedSize = Files.size(file);
@@ -952,41 +1105,25 @@ public class FileTypeValidator {
                 if (++entryCount > guard.getMaxEntries()) {
                     return "疑似 ZIP 炸弹，条目数超过 " + guard.getMaxEntries();
                 }
-                long entrySize = entry.getSize();
-                if (entrySize >= 0) {
-                    if (entrySize > guard.getMaxEntryUncompressed()) {
+                // 实际解压计数：单 entry 与累计超限均即时中断
+                long entryBytes = 0;
+                int n;
+                while ((n = archive.read(buffer)) != -1) {
+                    entryBytes += n;
+                    if (entryBytes > guard.getMaxEntryUncompressed()) {
                         return singleEntryBombMessage(guard);
                     }
-                    totalUncompressed += entrySize;
-                } else {
-                    // 未知大小：实际读取计数，单 entry 与累计超限均即时中断
-                    long entryBytes = 0;
-                    int n;
-                    while ((n = archive.read(buffer)) != -1) {
-                        entryBytes += n;
-                        if (entryBytes > guard.getMaxEntryUncompressed()) {
-                            return singleEntryBombMessage(guard);
-                        }
-                        totalUncompressed += n;
-                        if (totalUncompressed > guard.getMaxTotalUncompressed()) {
-                            return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
-                        }
+                    totalUncompressed += n;
+                    if (totalUncompressed > guard.getMaxTotalUncompressed()) {
+                        return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
                     }
-                }
-                if (totalUncompressed > guard.getMaxTotalUncompressed()) {
-                    return "疑似 ZIP 炸弹，累计解压大小超过 " + (guard.getMaxTotalUncompressed() >> 20) + "MB";
                 }
                 if (compressedSize > 0 && totalUncompressed > compressedSize * guard.getMaxCompressionRatio()) {
                     return "疑似 ZIP 炸弹，压缩比超过 " + guard.getMaxCompressionRatio() + ":1";
                 }
-                if (!entry.isDirectory()
-                        && entry.getName().toLowerCase(Locale.ROOT).endsWith(".zip")
-                        && depth + 1 > guard.getMaxNestingDepth()) {
-                    return "疑似嵌套 ZIP 炸弹，压缩包嵌套深度超过 " + guard.getMaxNestingDepth();
-                }
             }
         } catch (IOException e) {
-            // 损坏的 zip 交由 ClamAV/YARA 判定；此处异常按引擎故障上抛
+            // 损坏的 zip 或声明值与实际不符（流错位）按引擎故障上抛，fail-closed 拒绝
             throw new ScanFailedException("ZIP 检查失败: " + e.getMessage(), e);
         }
         return null;
@@ -994,13 +1131,6 @@ public class FileTypeValidator {
 
     private String singleEntryBombMessage(VirusScanProperties.ZipGuard guard) {
         return "疑似 ZIP 炸弹，单文件解压大小超过 " + (guard.getMaxEntryUncompressed() >> 20) + "MB";
-    }
-
-    private String extractExtension(String filename) {
-        if (filename == null || !filename.contains(".")) {
-            return "";
-        }
-        return filename.substring(filename.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
     }
 }
 ```
@@ -1034,7 +1164,9 @@ import java.util.zip.ZipFile;
  * - PDF：分块 + 重叠窗口扫描 /JavaScript+/OpenAction、/Launch；
  *   对 FlateDecode 压缩对象流无效属已知限制，深度检测由 YARA 规则与 ClamAV 兜底
  *
- * 全程流式/分块读取，不整文件入内存。
+ * 内存策略：PDF 分块流式读取；OOXML 仅遍历条目名；OLE2 宏模块由 POI
+ * VBAMacroReader 提取（POI API 全量返回 Map，属已知限制），检测阶段
+ * 逐模块进行、不额外拼接副本。
  */
 @Slf4j
 @Component
@@ -1058,18 +1190,24 @@ public class DocumentThreatScanner {
     }
 
     /**
+     * @param mimeType Tika 探测的 MIME（管道复用值）。按内容探测结果路由扫描分支，
+     *                 不依赖客户端可控的文件名扩展名
      * @return null = 干净/非文档；非 null = 威胁检出
      */
-    public DocThreat scan(Path file, String detectedMime) {
-        String filename = file.getFileName().toString().toLowerCase(Locale.ROOT);
+    public DocThreat scan(Path file, String mimeType) {
+        if (mimeType == null) {
+            return null;
+        }
         try {
-            if (filename.endsWith(".docx") || filename.endsWith(".xlsx") || filename.endsWith(".pptx")) {
+            if (mimeType.startsWith("application/vnd.openxmlformats-officedocument.")) {
                 return scanOoxml(file);
             }
-            if (filename.endsWith(".doc") || filename.endsWith(".xls") || filename.endsWith(".ppt")) {
+            if (mimeType.equals("application/msword")
+                    || mimeType.equals("application/vnd.ms-excel")
+                    || mimeType.equals("application/vnd.ms-powerpoint")) {
                 return scanOle2(file);
             }
-            if (filename.endsWith(".pdf")) {
+            if (mimeType.equals("application/pdf")) {
                 return scanPdf(file);
             }
             return null;
@@ -1095,13 +1233,15 @@ public class DocumentThreatScanner {
                     hasActiveX = true;
                 }
             }
-            if (hasVba) {
-                log.warn("OOXML contains VBA project: {}", file.getFileName());
-                return new DocThreat("Office 文档包含 VBA 宏", DocThreat.Kind.MACRO);
-            }
+            // ActiveX 先于 VBA 判定：两者并存时若 VBA 先命中，FLAG 策略会将其放行，
+            // 导致"ActiveX 始终拦截"被绕过
             if (hasActiveX) {
                 log.warn("OOXML contains ActiveX controls: {}", file.getFileName());
                 return new DocThreat("Office 文档包含 ActiveX 控件", DocThreat.Kind.ACTIVE_X);
+            }
+            if (hasVba) {
+                log.warn("OOXML contains VBA project: {}", file.getFileName());
+                return new DocThreat("Office 文档包含 VBA 宏", DocThreat.Kind.MACRO);
             }
             return null;
         }
@@ -1113,13 +1253,15 @@ public class DocumentThreatScanner {
             if (macros.isEmpty()) {
                 return null;
             }
-            StringBuilder all = new StringBuilder();
-            macros.values().forEach(code -> all.append(code.toLowerCase(Locale.ROOT)).append('\n'));
-            String code = all.toString();
-            for (String token : SUSPICIOUS_MACRO_TOKENS) {
-                if (code.contains(token)) {
-                    log.warn("OLE2 contains suspicious macro token '{}' in {}", token, file.getFileName());
-                    return new DocThreat("OLE2 文档包含可疑 VBA 宏（命中: " + token + "）", DocThreat.Kind.MACRO);
+            // 逐模块小写化后匹配（命中即返回），不拼接全局大字符串：
+            // 拼接会在 readMacros 已加载的宏之外再产生约一倍的内存副本
+            for (String code : macros.values()) {
+                String lowered = code.toLowerCase(Locale.ROOT);
+                for (String token : SUSPICIOUS_MACRO_TOKENS) {
+                    if (lowered.contains(token)) {
+                        log.warn("OLE2 contains suspicious macro token '{}' in {}", token, file.getFileName());
+                        return new DocThreat("OLE2 文档包含可疑 VBA 宏（命中: " + token + "）", DocThreat.Kind.MACRO);
+                    }
                 }
             }
             log.info("OLE2 contains benign macros: {}", file.getFileName());
@@ -1174,9 +1316,9 @@ import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.ScanResult;
 import zxf.upload.model.ScanStatus;
 import zxf.upload.model.exception.ScanFailedException;
+import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Semaphore;
 
@@ -1218,7 +1360,7 @@ public class VirusScanService {
 
     /**
      * 执行完整扫描管道。
-     * @return CLEAN 时 details 为正式存储路径；其余状态 staging 文件已被妥善处理
+     * @return CLEAN 时 details 为正式存储文件名（不含路径）；其余状态 staging 文件已被妥善处理
      */
     public ScanResult scanFile(Path stagingFile, String originalFilename) {
         try {
@@ -1240,8 +1382,8 @@ public class VirusScanService {
             switch (result.getStatus()) {
                 case CLEAN -> {
                     String stored = storageService.store(stagingFile, originalFilename);
-                    deleteQuietly(stagingFile);
-                    log.info("Scan passed: {} -> {}", originalFilename, stored);
+                    FileUtils.deleteQuietly(stagingFile);
+                    log.info("Scan passed: {} -> {}", FileUtils.sanitizeForLog(originalFilename), stored);
                     return ScanResult.builder()
                             .status(ScanStatus.CLEAN)
                             .detectedMime(result.getDetectedMime())
@@ -1251,11 +1393,11 @@ public class VirusScanService {
                 }
                 case INFECTED -> {
                     storageService.moveToQuarantine(stagingFile);
-                    log.warn("Infected file quarantined: {}", originalFilename);
+                    log.warn("Infected file quarantined: {}", FileUtils.sanitizeForLog(originalFilename));
                     return result;
                 }
                 default -> {
-                    deleteQuietly(stagingFile);
+                    FileUtils.deleteQuietly(stagingFile);
                     return result;
                 }
             }
@@ -1266,7 +1408,7 @@ public class VirusScanService {
                 try {
                     // 先入库再清理：若先 delete，store 将读不到文件
                     String stored = storageService.store(stagingFile, originalFilename);
-                    deleteQuietly(stagingFile);
+                    FileUtils.deleteQuietly(stagingFile);
                     return ScanResult.builder()
                             .status(ScanStatus.CLEAN)
                             .details(stored)
@@ -1276,10 +1418,10 @@ public class VirusScanService {
                     throw new ScanFailedException("fail-open 降级存储失败", ioe);
                 }
             }
-            deleteQuietly(stagingFile);
+            FileUtils.deleteQuietly(stagingFile);
             throw e;
         } catch (IOException e) {
-            deleteQuietly(stagingFile);
+            FileUtils.deleteQuietly(stagingFile);
             throw new ScanFailedException("扫描管道 IO 异常: " + e.getMessage(), e);
         }
     }
@@ -1308,14 +1450,14 @@ public class VirusScanService {
             return ScanResult.infected(stagingFile, yaraThreat);
         }
 
-        // 阶段 4：文档威胁（复用 mime，不重复探测）
+        // 阶段 4：文档威胁（复用 mime，按 mime 路由扫描分支）
         if (fileTypeValidator.isDocumentFormat(mime)) {
             DocumentThreatScanner.DocThreat docThreat = documentThreatScanner.scan(stagingFile, mime);
             if (docThreat != null) {
                 // 宏策略分级：FLAG 放行并打标告警；ActiveX/PDF 危险动作始终拦截
                 if (docThreat.kind() == DocumentThreatScanner.DocThreat.Kind.MACRO
                         && properties.getMacroPolicy() == VirusScanProperties.MacroPolicy.FLAG) {
-                    log.warn("含宏文档按 FLAG 策略放行: {} - {}", originalFilename, docThreat.description());
+                    log.warn("含宏文档按 FLAG 策略放行: {} - {}", FileUtils.sanitizeForLog(originalFilename), docThreat.description());
                     return ScanResult.builder()
                             .status(ScanStatus.CLEAN)
                             .stagingPath(stagingFile)
@@ -1328,14 +1470,6 @@ public class VirusScanService {
         }
 
         return ScanResult.clean(stagingFile, mime);
-    }
-
-    private void deleteQuietly(Path path) {
-        try {
-            Files.deleteIfExists(path);
-        } catch (IOException e) {
-            log.error("清理暂存文件失败: {}", path, e);
-        }
     }
 }
 ```
@@ -1350,13 +1484,13 @@ package zxf.upload.service;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import zxf.upload.config.VirusScanProperties;
+import zxf.upload.support.io.FileUtils;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.util.Locale;
 import java.util.UUID;
 
 @Slf4j
@@ -1381,30 +1515,35 @@ public class FileStorageService {
         }
     }
 
+    /**
+     * 入库并返回存储文件名（UUID.ext）。完整物理路径只进日志，
+     * 不随 ScanResult/UploadResponse 返回给客户端（防内部路径泄漏）。
+     */
     public String store(Path sourceFile, String originalFilename) throws IOException {
-        String ext = extractExtension(originalFilename);
+        String ext = FileUtils.extension(originalFilename);
         Path target = storagePath.resolve(UUID.randomUUID() + (ext.isEmpty() ? "" : "." + ext));
         Files.copy(sourceFile, target, StandardCopyOption.REPLACE_EXISTING);
-        log.info("File stored: {} -> {}", originalFilename, target);
-        return target.toAbsolutePath().toString();
+        log.info("File stored: {} -> {}", FileUtils.sanitizeForLog(originalFilename), target);
+        return target.getFileName().toString();
     }
 
     public void moveToQuarantine(Path file) {
+        // 隔离文件重命名为 UUID，防止原名冲突与路径信息泄漏
+        Path target = quarantinePath.resolve(UUID.randomUUID() + ".quarantined");
         try {
-            // 隔离文件重命名为 UUID，防止原名冲突与路径信息泄漏
-            Path target = quarantinePath.resolve(UUID.randomUUID() + ".quarantined");
             Files.move(file, target, StandardCopyOption.REPLACE_EXISTING);
-            log.info("File quarantined: {} -> {}", file.getFileName(), target.getFileName());
         } catch (IOException e) {
-            log.error("移入隔离区失败: {}", file, e);
+            // move 失败（如 staging 与隔离区跨文件系统）降级 copy+delete，
+            // 确保威胁文件不滞留 staging；仍失败则只能记录（文件留在 staging）
+            try {
+                Files.copy(file, target, StandardCopyOption.REPLACE_EXISTING);
+                Files.delete(file);
+            } catch (IOException fallbackError) {
+                log.error("移入隔离区失败，文件滞留 staging: {}", file, fallbackError);
+                return;
+            }
         }
-    }
-
-    private String extractExtension(String filename) {
-        if (filename == null || !filename.contains(".")) {
-            return "";
-        }
-        return filename.substring(filename.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
+        log.info("File quarantined: {} -> {}", file.getFileName(), target.getFileName());
     }
 }
 ```
@@ -1451,9 +1590,15 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Service
 public class AsyncScanProcessor {
+
+    /** pendingEmitters TTL：需高于 SSE emitter 超时（Controller 300s），保证 emitter 超时前仍在缓存内可被心跳清理 */
+    private static final long PENDING_EMITTER_TTL_MINUTES = 10;
+    private static final long PENDING_EMITTER_MAX_SIZE = 10_000;
+    private static final long COMPLETED_SCAN_MAX_SIZE = 100_000;
+
     private final VirusScanService scanService;
 
-    /** SSE 连接等待中的 emitter；TTL 略高于 emitter 超时（300s），正常路径由 onCompletion/onTimeout 移除 */
+    /** SSE 连接等待中的 emitter，正常路径由 onCompletion/onTimeout 移除 */
     private final Cache<String, SseEmitter> pendingEmitters;
     /** 已完成扫描结果，供 SSE 回放与轮询兜底 */
     private final Cache<String, UploadResponse> completedScans;
@@ -1462,12 +1607,12 @@ public class AsyncScanProcessor {
         this.scanService = scanService;
         long retention = properties.getResultRetentionMinutes();
         this.pendingEmitters = Caffeine.newBuilder()
-                .expireAfterWrite(10, TimeUnit.MINUTES)
-                .maximumSize(10_000)
+                .expireAfterWrite(PENDING_EMITTER_TTL_MINUTES, TimeUnit.MINUTES)
+                .maximumSize(PENDING_EMITTER_MAX_SIZE)
                 .build();
         this.completedScans = Caffeine.newBuilder()
                 .expireAfterWrite(retention, TimeUnit.MINUTES)
-                .maximumSize(100_000)
+                .maximumSize(COMPLETED_SCAN_MAX_SIZE)
                 .build();
     }
 
@@ -1487,7 +1632,8 @@ public class AsyncScanProcessor {
             try {
                 emitter.send(SseEmitter.event().comment("hb"));
             } catch (Exception e) {
-                pendingEmitters.asMap().remove(scanId);
+                // 两参 remove：只摘当前 emitter，避免误删同 scanId 重连后的新 emitter
+                pendingEmitters.asMap().remove(scanId, emitter);
                 log.debug("SSE 心跳发送失败，移除 emitter: {}", scanId);
             }
         });
@@ -1496,21 +1642,29 @@ public class AsyncScanProcessor {
     public void registerEmitter(String scanId, SseEmitter emitter) {
         // 先查结果缓存：扫描可能已先于 SSE 连接完成
         UploadResponse done = completedScans.getIfPresent(scanId);
-        if (done != null) {
-            try {
-                emitter.send(SseEmitter.event().name(eventName(done.getStatus())).data(done));
-                emitter.complete();
-            } catch (IOException e) {
-                log.warn("SSE 回放失败: {}", scanId, e);
+        if (done == null) {
+            pendingEmitters.put(scanId, emitter);
+            emitter.onCompletion(() -> pendingEmitters.asMap().remove(scanId, emitter));
+            emitter.onTimeout(() -> {
+                pendingEmitters.asMap().remove(scanId, emitter);
+                log.warn("SSE emitter 超时: {}", scanId);
+            });
+            // double-check：processScan 可能在上面查缓存与 put 之间完成，其 remove
+            // 拿不到本 emitter，需在此补发；若 processScan 已摘走 emitter（remove 返回
+            // false），推送由它负责，此处不重复发送（避免双发与 complete 后再 send）
+            done = completedScans.getIfPresent(scanId);
+            if (done == null || !pendingEmitters.asMap().remove(scanId, emitter)) {
+                return;
             }
-            return;
         }
-        pendingEmitters.put(scanId, emitter);
-        emitter.onCompletion(() -> pendingEmitters.asMap().remove(scanId));
-        emitter.onTimeout(() -> {
-            pendingEmitters.asMap().remove(scanId);
-            log.warn("SSE emitter 超时: {}", scanId);
-        });
+        try {
+            emitter.send(SseEmitter.event().name(eventName(done.getStatus())).data(done));
+            emitter.complete();
+        } catch (IOException e) {
+            // complete 有 sendFailed 守卫，send 失败后调用安全：显式结束连接，避免客户端挂到超时
+            log.warn("SSE 回放失败: {}", scanId, e);
+            emitter.complete();
+        }
     }
 
     @Async   // 使用 Boot 装配的虚拟线程执行器（spring.threads.virtual.enabled=true）
@@ -1521,8 +1675,10 @@ public class AsyncScanProcessor {
             String storedPath = result.isClean() ? result.getDetails() : null;
             response = UploadResponse.of(scanId, result, storedPath);
         } catch (Exception e) {
+            // 引擎故障细节（host:port、内部路径、异常消息）只进日志；对外通用文案，
+            // 与同步路径 GlobalExceptionHandler 对 ScanFailedException 的收口一致
             log.error("异步扫描失败: scanId={}", scanId, e);
-            response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描失败: " + e.getMessage(), null);
+            response = new UploadResponse(scanId, ScanStatus.ERROR, "扫描引擎暂时不可用，请稍后重试", null);
         }
 
         completedScans.put(scanId, response);
@@ -1533,6 +1689,7 @@ public class AsyncScanProcessor {
                 emitter.complete();
             } catch (IOException e) {
                 log.warn("SSE 推送失败（结果已缓存，客户端可轮询）: {}", scanId, e);
+                emitter.complete();
             }
         }
     }
@@ -1575,6 +1732,7 @@ import zxf.upload.service.StagingService;
 import zxf.upload.service.VirusScanService;
 
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.UUID;
 
 @Slf4j
@@ -1582,6 +1740,10 @@ import java.util.UUID;
 @RequestMapping("/api/files")
 @RequiredArgsConstructor
 public class FileUploadController {
+
+    /** SSE 连接超时；需低于 AsyncScanProcessor 中 pendingEmitters 的 TTL（10 分钟） */
+    private static final long SSE_EMITTER_TIMEOUT_MS = 300_000L;
+
     private final StagingService stagingService;
     private final VirusScanService scanService;
     private final AsyncScanProcessor asyncProcessor;
@@ -1590,7 +1752,9 @@ public class FileUploadController {
     @PostMapping("/upload")
     public ResponseEntity<UploadResponse> upload(
             @RequestParam("file") MultipartFile file,
-            @RequestHeader(value = "X-Scan-Async", defaultValue = "false") boolean async) {
+            @RequestHeader(value = "X-Scan-Async", defaultValue = "false") String asyncHeader) {
+
+        boolean async = parseAsyncHeader(asyncHeader);
 
         // 大文件强制异步：同步全管道扫描耗时会超客户端/网关超时
         long syncMax = properties.getSyncMaxFileSize();
@@ -1620,10 +1784,27 @@ public class FileUploadController {
         };
     }
 
+    /**
+     * 显式解析 X-Scan-Async：沿用 Spring 原生 boolean 转换接受的取值
+     * （true/on/yes/1、false/off/no/0，忽略大小写），其余非法值按 400 拒绝，
+     * 避免落入类型转换异常被兜底 handler 映射为 500。
+     */
+    private boolean parseAsyncHeader(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "true", "on", "yes", "1" -> true;
+            case "false", "off", "no", "0" -> false;
+            default -> throw new FileRejectedException("X-Scan-Async 请求头取值非法: " + normalized);
+        };
+    }
+
     /** SSE 推送（增强通道） */
     @GetMapping(value = "/scan/{scanId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter scanEvents(@PathVariable String scanId) {
-        SseEmitter emitter = new SseEmitter(300_000L);
+        SseEmitter emitter = new SseEmitter(SSE_EMITTER_TIMEOUT_MS);
         asyncProcessor.registerEmitter(scanId, emitter);
         return emitter;
     }
@@ -1644,9 +1825,12 @@ package zxf.upload.support.rest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import zxf.upload.model.exception.FileRejectedException;
 import zxf.upload.model.exception.ScanFailedException;
 import zxf.upload.model.exception.VirusDetectedException;
@@ -1685,6 +1869,16 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleMaxSize(MaxUploadSizeExceededException ex) {
         return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
                 .body(new ErrorResponse("FILE_TOO_LARGE", "文件超过大小限制"));
+    }
+
+    /** 缺 file part / 非 multipart 请求等客户端错误 → 400（避免落入兜底 handler 映射为 500） */
+    @ExceptionHandler({MissingServletRequestParameterException.class,
+            MissingServletRequestPartException.class,
+            MultipartException.class})
+    public ResponseEntity<ErrorResponse> handleMissingFilePart(Exception ex) {
+        log.debug("非法上传请求: {}", ex.getMessage());
+        return ResponseEntity.badRequest()
+                .body(new ErrorResponse("FILE_REJECTED", "缺少上传文件或请求格式非法"));
     }
 
     /** 兜底：未预见异常统一 500，避免容器默认错误页泄漏细节 */
@@ -1777,12 +1971,12 @@ zxf:
     zip:
       max-compression-ratio: 100
       max-total-uncompressed: 1073741824   # 1GB
-      max-nesting-depth: 2
       max-entries: 10000                  # 条目总数上限（海量 entry 炸弹）
       max-entry-uncompressed: 104857600   # 单 entry 解压上限 100MB
     clamav:
       host: ${CLAMAV_HOST:localhost}
       port: ${CLAMAV_PORT:3310}
+      timeout-seconds: ${CLAMAV_TIMEOUT_SECONDS:60}   # 单次扫描超时，挂起时快速失败并计入熔断
     yara:
       enabled: true
       binary-path: ${YARA_BINARY:yara}
@@ -1825,30 +2019,37 @@ volumes:
 
 ## Task 16: 测试计划
 
+> 与 `src/test` 实际用例保持同步：`mvn clean test` 共 51 个用例；另有 EicarScanIT 集成测试 2 个用例（failsafe，`mvn verify` 执行）。
+
 ### VirusScanServiceTest（单元，Mock 各扫描器）
 
 - 各阶段短路顺序：类型拒绝后不再调 ClamAV；
 - CLEAN → staging 文件被删除且调用 store；
 - INFECTED → 调用 moveToQuarantine；
-- REJECTED/ERROR → staging 被删除（`Files.exists` 断言无泄漏）；
 - ScanFailedException + failStrategy=CLOSED → 异常上抛；OPEN → 降级入库并打标 `scan-engine-degraded`（断言先 store 后 delete）；
-- 宏策略分级：MACRO + BLOCK（默认）→ 隔离；MACRO + FLAG → 放行且打标 `macro-flagged` 贯穿到最终结果；ACTIVE_X + FLAG → 仍拦截；
-- 并发闸门：50 并发调用 `scanFile`，断言同时在扫数量 ≤ `max-concurrent-scans`（同步/异步统一背压生效）。
+- 宏策略分级：MACRO + FLAG → 放行且打标 `macro-flagged`；ACTIVE_X + FLAG → 仍拦截；
+- 并发闸门：10 并发调用 `scanFile`，断言同时在扫数量 ≤ `max-concurrent-scans`（同步/异步统一背压生效）。
 
 ### FileTypeValidatorTest
 
 - 伪造扩展名：exe 内容改名 `.pdf` → REJECTED；
-- csv 被 Tika 探测为 text/plain → 通过；
+- csv 被 Tika 探测为 text/csv 或 text/plain → 通过；
 - EICAR 串写入 `.txt` → 类型层通过（留给 ClamAV 层）；
 - ZIP 炸弹样例（高压缩比构造）→ REJECTED；
-- 未知大小 entry（streaming zip）→ 按实际读取计数，不误判；
 - 海量空 entry（条目数超限）→ REJECTED；
-- 单 entry 解压超限（总量未超限时）→ REJECTED。
+- 正常 ZIP → 通过；
+- isDocumentFormat 对文档/非文档 MIME 的判定。
+
+### FileStorageServiceTest
+
+- store 只返回存储文件名（UUID.ext），不泄漏服务器绝对路径；
+- moveToQuarantine → 文件移入隔离区并重命名，源文件删除。
 
 ### ClamAvScannerTest
 
-- 干净文件 → null；引擎异常 → ScanFailedException 包装；
+- 干净文件 → null；病毒文件 → 返回威胁描述；引擎异常 → ScanFailedException 包装；
 - 持续失败达阈值 → 熔断打开后快速失败（"熔断中"）且不再触碰引擎；
+- 挂起扫描 → timeoutSeconds 内快速失败并计入熔断失败率（扫描提交虚拟线程限时等待）；
 - ping 委托 client（供健康检查）。
 
 ### ClamAvHealthIndicatorTest
@@ -1857,32 +2058,33 @@ volumes:
 
 ### StagingServiceTest
 
-- 空文件/非法扩展名 → 400 预检拦截；
-- 落盘中途失败 → 抛 FileRejectedException 且 staging 目录无残留。
+- 空文件/非法扩展名/超大文件 → 400 预检拦截；
+- 正常文件 → 落盘成功。
 
 ### YaraScannerTest
 
-- `enabled=false` 时构造不解析规则路径（规则文件缺失也能启动）、scan 直接返回 null。
+- `enabled=false`：scan 直接返回 null；构造不解析规则路径（规则文件缺失也能启动）；
+- yara 进程挂起不退出 → timeoutSeconds 内强制失败（输出读取移入独立虚拟线程排空，防 readLine 永久阻塞）。
 
-### DocumentThreatScannerTest
+### DocumentThreatScannerTest（按 Tika MIME 路由扫描分支）
 
-- 含 vbaProject.bin 的 docx → 威胁；
-- POI 生成带 `AutoOpen + Shell` 宏的 xls → 威胁；良性宏 → 放行；
-- 含 `/JavaScript + /OpenAction` 的 PDF → 威胁；
-- 100MB 大 PDF → 扫描内存占用平稳（分块验证）。
+- 含 vbaProject.bin 的 docx → MACRO；
+- 含 ActiveX 的 docx → ACTIVE_X；VBA + ActiveX 并存 → ACTIVE_X 优先拦截（不受宏 FLAG 策略放行影响）；
+- 干净 docx → null；非文档 MIME（text/plain）→ null；
+- 无宏的良性 xls → null（POI 空宏路径不误判）；
+- 含 `/JavaScript + /OpenAction` 的 PDF → 威胁；含 `/Launch` 的 PDF → 威胁；干净 PDF → null。
+
+### AsyncScanProcessorTest
+
+- 扫描先于 SSE 连接完成 → registerEmitter 立即回放缓存结果并 complete（时序安全）。
 
 ### FileUploadControllerTest（@WebMvcTest）
 
 - 同步 CLEAN → 200；INFECTED → 422 VIRUS_DETECTED；REJECTED → 400 FILE_REJECTED；
-- CLEAN 携带打标 → message 透传（"文件安全（macro-flagged: …）"）；
-- 同步超 `sync-max-file-size` → 400 并提示走异步（不落盘）；异步超阈值 → 202；
 - 扫描引擎故障 → 502 SCAN_ENGINE_ERROR 且响应消息脱敏（不含引擎地址等内部细节）；
-- 未预期异常 → 兜底 500 INTERNAL_ERROR；
-- 异步时序用例：先 POST 拿到 scanId，扫描完成后**再**连 SSE → 仍能收到 complete 事件（回放）；`GET /scan/{scanId}` 轮询返回终态；
-- SSE 心跳：存活 emitter 收到注释帧；失效 emitter 被移除且不再接收完成事件；
-- 空文件 → 400；超大文件 → 413。
-
-> 并发背压用例随信号量闸门一并收归 VirusScanServiceTest（管道入口统一验证）。
+- 异步上传（X-Scan-Async: true）→ 202 + scanId；X-Scan-Async 非法值 → 400 FILE_REJECTED；
+- 缺少 file part → 400 FILE_REJECTED（不落 500 兜底）；
+- 轮询 `GET /scan/{scanId}` → 返回终态 / SCANNING。
 
 ### 集成测试（EicarScanIT，Testcontainers + failsafe）
 
@@ -1924,6 +2126,8 @@ curl http://localhost:8080/actuator/health                              # ClamAV
 - [x] 并发模型为 Virtual Threads：`spring.threads.virtual.enabled=true` + `@Async` 默认虚拟线程执行器 + Semaphore 背压
 - [x] 无 synchronized 块，无 pinning 风险点；阻塞 IO（process.waitFor / 文件读写）均对虚拟线程友好
 - [x] 暂存文件生命周期由管道收口，INFECTED 必进隔离区，无泄漏路径
+- [x] 对外响应不携带服务器内部路径：store 只返回存储文件名（UUID.ext），隔离文件重命名为 UUID
+- [x] ZIP 防护不信任 header 声明值，所有 entry 实际解压计数、超限即断；文档威胁按 Tika MIME 路由分支，ActiveX 先于 VBA 判定（FLAG 策略不波及 ActiveX）
 - [x] SSE 结果缓存 + 回放 + 轮询兜底，无时序窗口
 - [x] 异常语义清晰：400 FILE_REJECTED / 413 FILE_TOO_LARGE / 422 VIRUS_DETECTED / 502 SCAN_ENGINE_ERROR
 - [x] fail-strategy 可配，默认 CLOSED；enabled=false 行为明确

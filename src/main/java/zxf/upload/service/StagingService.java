@@ -13,7 +13,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -50,9 +49,7 @@ public class StagingService {
                     + properties.getMaxFileSize() / 1024 / 1024 + "MB");
         }
         String original = file.getOriginalFilename();
-        String ext = (original != null && original.contains("."))
-                ? original.substring(original.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT)
-                : "";
+        String ext = FileUtils.extension(original);
         // 扩展名预检（快路径，内容防伪由 Tika 负责）
         if (!ext.isEmpty() && !properties.getAllowedExtensions().contains(ext)) {
             throw new FileRejectedException("不支持的文件扩展名: " + ext);
@@ -62,13 +59,15 @@ public class StagingService {
         try (InputStream in = file.getInputStream()) {
             Files.copy(in, stagingFile, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
-            // 落盘失败（磁盘满/IO 错误）时清理残留的不完整文件
+            // 落盘失败（磁盘满/IO 错误）时清理残留的不完整文件；
+            // 异常细节（含内部路径）只进日志，对外通用文案
             try {
                 Files.deleteIfExists(stagingFile);
             } catch (IOException cleanupError) {
                 log.warn("清理失败的暂存文件失败: {}", stagingFile, cleanupError);
             }
-            throw new FileRejectedException("文件暂存失败: " + e.getMessage());
+            log.error("文件暂存失败: {}", stagingFile, e);
+            throw new FileRejectedException("文件暂存失败，请稍后重试");
         }
         log.debug("File staged: {} -> {}", FileUtils.sanitizeForLog(original), stagingFile);
         return stagingFile;
