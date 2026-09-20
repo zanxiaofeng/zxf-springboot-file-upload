@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo \"Java: $(java -version 2>&1 | head -1)\" && echo \"Maven: $(mvn --version 2>/dev/null | head -1)\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import sys,json,re; d=json.load(sys.stdin); s=json.dumps(d); sys.exit(1) if re.search(r\"\\brm\\b[^;\\n|&]*\\s(-rf|-fr|-r\\s+-f|-f\\s+-r)\\b\", s) else sys.exit(0)' || { echo 'Blocked: dangerous rm -rf command' >&2; exit 2; }"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mvn compile -q"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mvn test -q || { echo '{\"decision\":\"block\",\"reason\":\"tests failed - fix the failing tests before stopping.\"}'; exit 0; }"
+          }
+        ]
+      }
+    ]
+  }
+}
