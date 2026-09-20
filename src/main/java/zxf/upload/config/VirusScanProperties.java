@@ -49,7 +49,7 @@ public class VirusScanProperties {
      */
     private MacroPolicy macroPolicy = MacroPolicy.BLOCK;
 
-    /** 同步上传大小阈值（字节）：超过则要求走异步通道（X-Scan-Async）。默认 20MB；0=不限制 */
+    /** 同步上传大小阈值（字节）：超过则要求走异步端点（POST /api/files/async/upload）。默认 20MB；0=不限制 */
     @Min(0)
     private long syncMaxFileSize = 20L << 20;
 

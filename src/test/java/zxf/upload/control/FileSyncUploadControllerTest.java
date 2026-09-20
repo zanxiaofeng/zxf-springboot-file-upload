@@ -1,5 +1,6 @@
 package zxf.upload.control;
 
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -10,12 +11,9 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import zxf.upload.config.VirusScanProperties;
 import zxf.upload.model.ScanResult;
-import zxf.upload.model.ScanStatus;
-import zxf.upload.model.UploadResponse;
 import zxf.upload.model.exception.FileRejectedException;
 import zxf.upload.model.exception.ScanFailedException;
 import zxf.upload.model.exception.VirusDetectedException;
-import zxf.upload.service.AsyncScanProcessor;
 import zxf.upload.service.StagingService;
 import zxf.upload.service.VirusScanService;
 import zxf.upload.support.rest.GlobalExceptionHandler;
@@ -28,15 +26,16 @@ import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-@WebMvcTest(FileUploadController.class)
+@WebMvcTest(FileSyncUploadController.class)
 @Import(GlobalExceptionHandler.class)
-@DisplayName("FileUploadController REST API")
-class FileUploadControllerTest {
+@DisplayName("FileSyncUploadController REST API")
+class FileSyncUploadControllerTest {
+
+    private static final String UPLOAD_URL = "/api/files/sync/upload";
 
     @Autowired MockMvc mvc;
     @MockitoBean StagingService stagingService;
     @MockitoBean VirusScanService scanService;
-    @MockitoBean AsyncScanProcessor asyncProcessor;
     @MockitoBean VirusScanProperties properties;
 
     @Test
@@ -48,7 +47,7 @@ class FileUploadControllerTest {
         when(stagingService.stage(any())).thenReturn(Path.of("/tmp/staged.txt"));
         when(scanService.scanFile(any(), anyString())).thenReturn(result);
 
-        mvc.perform(multipart("/api/files/upload").file(file))
+        mvc.perform(multipart(UPLOAD_URL).file(file))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("CLEAN"))
                 .andExpect(jsonPath("$.message").value("文件安全"));
@@ -63,7 +62,7 @@ class FileUploadControllerTest {
         when(stagingService.stage(any())).thenReturn(Path.of("/tmp/staged.txt"));
         when(scanService.scanFile(any(), anyString())).thenThrow(new VirusDetectedException(result));
 
-        mvc.perform(multipart("/api/files/upload").file(file))
+        mvc.perform(multipart(UPLOAD_URL).file(file))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("VIRUS_DETECTED"));
     }
@@ -77,7 +76,7 @@ class FileUploadControllerTest {
         when(scanService.scanFile(any(), anyString()))
                 .thenThrow(new FileRejectedException("文件类型与扩展名不符"));
 
-        mvc.perform(multipart("/api/files/upload").file(file))
+        mvc.perform(multipart(UPLOAD_URL).file(file))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("FILE_REJECTED"));
     }
@@ -91,63 +90,32 @@ class FileUploadControllerTest {
         when(scanService.scanFile(any(), anyString()))
                 .thenThrow(new ScanFailedException("ClamAV connection refused at localhost:3310"));
 
-        mvc.perform(multipart("/api/files/upload").file(file))
+        mvc.perform(multipart(UPLOAD_URL).file(file))
                 .andExpect(status().isBadGateway())
                 .andExpect(jsonPath("$.code").value("SCAN_ENGINE_ERROR"))
                 .andExpect(jsonPath("$.message").value("扫描引擎暂时不可用，请稍后重试"));
     }
 
     @Test
-    @DisplayName("异步上传 → 202 + scanId")
-    void asyncUpload_returns202() throws Exception {
-        var file = new MockMultipartFile("file", "big.txt", "text/plain", "hello".getBytes());
+    @DisplayName("超过同步阈值 → 400 FILE_REJECTED，落盘前拦截并提示异步端点")
+    void syncOverLimit_rejectedBeforeStaging() throws Exception {
+        // stub 10MB 阈值，构造 10MB+1 文件触发检查
+        when(properties.getSyncMaxFileSize()).thenReturn(10L << 20);
+        var file = new MockMultipartFile("file", "big.txt", "text/plain", new byte[10 * 1024 * 1024 + 1]);
 
-        when(stagingService.stage(any())).thenReturn(Path.of("/tmp/staged.txt"));
-        doNothing().when(asyncProcessor).processScan(anyString(), any(), anyString());
-
-        mvc.perform(multipart("/api/files/upload").file(file).header("X-Scan-Async", "true"))
-                .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.status").value("SCANNING"))
-                .andExpect(jsonPath("$.scanId").isNotEmpty());
-    }
-
-    @Test
-    @DisplayName("轮询：返回扫描状态")
-    void pollStatus_returnsResult() throws Exception {
-        when(asyncProcessor.getResult("scan-123"))
-                .thenReturn(new UploadResponse("scan-123", ScanStatus.CLEAN, "文件安全", "/data/file.txt"));
-
-        mvc.perform(get("/api/files/scan/scan-123"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("CLEAN"))
-                .andExpect(jsonPath("$.filePath").value("/data/file.txt"));
-    }
-
-    @Test
-    @DisplayName("轮询：扫描进行中")
-    void pollStatus_scanning() throws Exception {
-        when(asyncProcessor.getResult("scan-456"))
-                .thenReturn(UploadResponse.scanning("scan-456"));
-
-        mvc.perform(get("/api/files/scan/scan-456"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("SCANNING"));
-    }
-
-    @Test
-    @DisplayName("X-Scan-Async 非法值 → 400 FILE_REJECTED")
-    void invalidAsyncHeader_returns400() throws Exception {
-        var file = new MockMultipartFile("file", "clean.txt", "text/plain", "hello".getBytes());
-
-        mvc.perform(multipart("/api/files/upload").file(file).header("X-Scan-Async", "1x"))
+        mvc.perform(multipart(UPLOAD_URL).file(file))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("FILE_REJECTED"));
+                .andExpect(jsonPath("$.code").value("FILE_REJECTED"))
+                .andExpect(jsonPath("$.message")
+                        .value(Matchers.containsString("/api/files/async/upload")));
+
+        verify(stagingService, never()).stage(any());
     }
 
     @Test
     @DisplayName("缺少 file part → 400 FILE_REJECTED（非 500 兜底）")
     void missingFilePart_returns400() throws Exception {
-        mvc.perform(multipart("/api/files/upload"))
+        mvc.perform(multipart(UPLOAD_URL))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("FILE_REJECTED"));
     }

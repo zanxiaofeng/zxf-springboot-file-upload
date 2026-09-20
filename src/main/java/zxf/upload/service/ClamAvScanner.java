@@ -4,6 +4,7 @@ import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import xyz.capybara.clamav.ClamavClient;
 import xyz.capybara.clamav.Platform;
@@ -43,6 +44,8 @@ public class ClamAvScanner {
     /** 执行 socket IO 的线程池（每任务一个虚拟线程，被放弃的挂起任务阻塞成本极低） */
     private final ExecutorService scanExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
+    /** 多构造器场景：显式指定 Spring 装配入口，避免回退无参构造器失败（另一个为测试注入用） */
+    @Autowired
     public ClamAvScanner(VirusScanProperties properties) {
         this(createClient(properties.getClamav()), properties.getClamav().getTimeoutSeconds());
     }

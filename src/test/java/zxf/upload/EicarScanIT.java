@@ -87,7 +87,7 @@ class EicarScanIT {
 
         HttpClient client = HttpClient.newHttpClient();
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/api/files/upload"))
+                .uri(URI.create("http://localhost:" + port + "/api/files/sync/upload"))
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                 .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.ISO_8859_1))
                 .build();
