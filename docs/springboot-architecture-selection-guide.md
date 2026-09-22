@@ -1,6 +1,6 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.10　|　日期：2026-09-23
+> 版本：v1.11　|　日期：2026-09-23
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
@@ -12,6 +12,7 @@
 > v1.8 修订：第四章包结构示例补齐全部空包内容（4.1 dto/config/common、4.2 event/vo/common、4.3 web dto/assembler 与 client dto、4.4 interfaces dto/command/inventory/shared/outbox/client dto/common、4.5 task/domain/persistence/messaging/client、4.6 shared common、4.7 internal domain/infrastructure、4.9 frameworks config 均给出代表类）；8.6 最小代码骨架由三段扩为完整链路六段（状态枚举与 VO、TaskMapper 条件更新、提交 Service 幂等三态、提交/轮询接口、线程池装配、@Async 独立执行器、兜底 Scheduler），并新增"事务提交前触发 @Async 读不到任务行"的时机坑提示（afterCommit 注册）。
 > v1.9 修订：第五次全面复审修复五处——8.6 markFailed 重试耗尽终态口径对齐 8.2 状态机（超限停 FAILED，TIMEOUT 改为可选的区分性终态说明）；8.6 ⑥ 补 PENDING 重新触发闭环（findPending + execute，修复"markFailed 回 PENDING 后无人触发"的链路缺口）；4.5 去除 OutboxRelayJob 双包重复（infrastructure/messaging/ 改放 OutboxMessage 表实体，轮询触发归 interfaces/task，对齐 9.6 ⑥ 与 3.4）；8.6 补 progress 回写来源（updateProgress）；8.6 ① 补 PG 事务 aborted 限定注（DuplicateKeyException 同事务续查仅 MySQL 语义）。
 > v1.10 修订：再次全面复审修复三处——4.5 messaging/ 补 MqProducer 投递发送方（v1.9 去重后该包无发送角色，且 9.6 ⑥ 要求发布器在 infrastructure/messaging/）；4.4 domain/shared/ 补 EventPublisher 发布端口（9.6 ④ 给 DDD 四层分配了端口角色但包树无落点）；8.6 ⑥ 方法更名 rescueTasks（v1.9 扩责后原名 rescueTimeoutTasks 名实不符）。
+> v1.11 修订：全面复审修复三处——4.4 去除 Money.java 跨包重复（domain/order/ 与 domain/shared/ 同名同类，Money 归 shared/ 共享值对象）；8.6 TaskStatusVO 补 retryAfter 字段（8.5-5 要求状态接口响应携带轮询间隔提示，原骨架只在提交响应上有）；4.1 event/ 补 OrderEventHandler（9.6 A 行 ①③ 同包，原树只有事件定义，与 4.2 同包标准对齐）。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八、九章】为实战专题（异步轮询、事件驱动），涉及相应场景时按需查阅。
 
@@ -268,8 +269,9 @@ com.example.app
 │   ├── exception/BizException.java    # 业务异常 + ErrorCode 枚举
 │   ├── enums/OrderStatusEnum.java     # 状态枚举
 │   └── util/JsonUtils.java
-├── event/                             # 进程内事件（见 9.6）：定义 + @TransactionalEventListener 订阅
-│   └── OrderPlacedEvent.java          #   发布在 Service；Spring 可直接发布纯 POJO
+├── event/                             # 进程内事件（见 9.6）：定义 + 订阅 Handler 同包
+│   ├── OrderPlacedEvent.java          #   发布在 Service；Spring 可直接发布纯 POJO
+│   └── OrderEventHandler.java         #   @TransactionalEventListener 订阅
 ├── task/                              # @Scheduled / XXL-Job，直调 Service
 │   └── OrderTimeoutJob.java
 └── listener/                          # MQ 监听直调 Service（与 Controller/task 同为触发入口，须幂等）
@@ -402,7 +404,7 @@ com.example.app
 │   ├── order/                             # 按聚合分包（不是按类型！）
 │   │   ├── Order.java                     # 聚合根（充血：place/cancel/pay）
 │   │   ├── OrderItem.java                 # 聚合内实体
-│   │   ├── OrderNo.java  Money.java       # 值对象
+│   │   ├── OrderNo.java                   # 值对象（Money 等共享值对象在 domain/shared/）
 │   │   ├── OrderStatus.java               # 状态枚举 + 状态机守卫
 │   │   ├── OrderRepository.java           # 仓储接口（仅此聚合一个）
 │   │   ├── OrderDomainService.java        # 跨聚合/依赖外部 ports 的领域逻辑
@@ -805,7 +807,8 @@ UPDATE task SET status='RUNNING' WHERE task_id=? AND status='PENDING'
 enum TaskStatus { PENDING, RUNNING, SUCCESS, FAILED, TIMEOUT, CANCELLED } // 终态不可逆（8.2）
 
 record TaskSubmitVO(String taskId, int retryAfter) {}                        // retryAfter：建议轮询间隔（秒）
-record TaskStatusVO(String status, int progress, String resultUrl, String error) {}
+record TaskStatusVO(String status, int progress, String resultUrl, String error, int retryAfter) {}
+// TaskStatusVO.retryAfter：状态响应同样携带轮询间隔提示（8.5-5），客户端指数退避
 record SubmitResult(String taskId, boolean duplicated) {}                    // duplicated=true 表示幂等命中
 
 // ===== Mapper：状态推进全部走条件更新（8.2）=====
