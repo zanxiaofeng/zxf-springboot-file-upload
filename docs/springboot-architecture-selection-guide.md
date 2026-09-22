@@ -1,6 +1,6 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.8　|　日期：2026-09-23
+> 版本：v1.9　|　日期：2026-09-23
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
@@ -10,6 +10,7 @@
 > v1.6 修订：新增 9.6"事件类的包结构安放"（7 角色安放铁律 + 逐方案落点表 + Spring 纯 POJO 发布前提）；第四章同步落位：4.1 补 event/、4.2 补 command/event/、4.3 补领域事件与进程内 Handler、4.4 补集成事件载荷、4.5 领域事件改为随聚合分包（修平铺矛盾）、4.6 补切片间事件通信、4.9 补事件三处落点。复审补遗：3.2 A/B 行事件口径同步、7.1 VO 三途同步、9.6 B 行定义与 Handler 同包修正、4.6 事件基类落点、4.9 入站消费落点、7.2 domain 纯净规则适用范围补全、使用指南提及实战专题。
 > v1.7 修订：投影类 Consumer 口径补齐（3.2 B 行入口列、第五章 B 行，对齐 4.2/9.6 既有例外）；7.4 评分建议补第 1 题分水岭、修正第 2 题指向（对齐 1.1 的 Q2→B 口径）；9.6 铁律①与六边形行对齐（4.3/9.6 六边形领域事件改随聚合分包，与 4.5 同标准）；8.6 提交代码补幂等命中 200 分支；4.5 投影链跨层调用补务实偏离声明；8.3 默认执行器措辞修正（问题在队列无界而非"禁用默认"）；7.2 模块隔离规则补参数化说明。
 > v1.8 修订：第四章包结构示例补齐全部空包内容（4.1 dto/config/common、4.2 event/vo/common、4.3 web dto/assembler 与 client dto、4.4 interfaces dto/command/inventory/shared/outbox/client dto/common、4.5 task/domain/persistence/messaging/client、4.6 shared common、4.7 internal domain/infrastructure、4.9 frameworks config 均给出代表类）；8.6 最小代码骨架由三段扩为完整链路六段（状态枚举与 VO、TaskMapper 条件更新、提交 Service 幂等三态、提交/轮询接口、线程池装配、@Async 独立执行器、兜底 Scheduler），并新增"事务提交前触发 @Async 读不到任务行"的时机坑提示（afterCommit 注册）。
+> v1.9 修订：第五次全面复审修复五处——8.6 markFailed 重试耗尽终态口径对齐 8.2 状态机（超限停 FAILED，TIMEOUT 改为可选的区分性终态说明）；8.6 ⑥ 补 PENDING 重新触发闭环（findPending + execute，修复"markFailed 回 PENDING 后无人触发"的链路缺口）；4.5 去除 OutboxRelayJob 双包重复（infrastructure/messaging/ 改放 OutboxMessage 表实体，轮询触发归 interfaces/task，对齐 9.6 ⑥ 与 3.4）；8.6 补 progress 回写来源（updateProgress）；8.6 ① 补 PG 事务 aborted 限定注（DuplicateKeyException 同事务续查仅 MySQL 语义）。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八、九章】为实战专题（异步轮询、事件驱动），涉及相应场景时按需查阅。
 
@@ -472,8 +473,8 @@ com.example.app
 │   │                                      # 投影链：投影 Consumer 直调 Updater，不经 application；HTTP 读链仍走 application.query
 │   │                                      # （务实偏离：投影链是"基础设施→基础设施"链路，interfaces→infrastructure
 │   │                                      #  的跨越是有意为之，不进经典四层依赖规则）
-│   ├── messaging/
-│   │   ├── OutboxRelayJob.java            # Outbox → MQ 投递
+│   ├── messaging/                         # Outbox → MQ 投递
+│   │   ├── OutboxMessage.java             #   发件箱表实体（字段见 9.3）；轮询触发的 Job 在 interfaces/task
 │   │   └── event/OrderPlacedMsg.java      #   集成事件载荷（见 9.6）
 │   └── client/PaymentACL.java             # 防腐层（写路径慎用同步调用）
 └── bootstrap/                             # 装配入口
@@ -814,8 +815,10 @@ interface TaskMapper {
     int tryMarkRunning(String taskId);                       // 影响行数 = 1 才算抢到执行权，天然防并发重复执行
 
     void markSuccess(String taskId, String resultUrl);
-    void markFailed(String taskId, String errorMsg);         // retry_count+1；未达上限回 PENDING 等待重试，超限转 TIMEOUT
+    void markFailed(String taskId, String errorMsg);         // retry_count+1；未达上限回 PENDING 等待重试，超限停 FAILED 终态（8.2）
+    void updateProgress(String taskId, int progress);        // 执行中回写进度（轮询的 progress 来源）
     List<TaskDO> findTimeoutRunning(LocalDateTime deadline); // 供兜底扫描
+    List<TaskDO> findPending();                              // 重启遗留 / 重试回队的 PENDING，供兜底重新触发
 }
 
 // ===== ① 提交（Service）：幂等 = 先查 + 唯一索引兜底 =====
@@ -829,6 +832,7 @@ public SubmitResult submit(ExportTaskRequest req) {
     try {
         taskMapper.insert(task);
     } catch (DuplicateKeyException e) {                      // 并发双提交：唯一索引兜底，转成查已有
+        // （MySQL 语义；PG 下冲突已令事务 aborted，需把捕获与重查挪到事务外）
         return new SubmitResult(taskMapper.findByBizNo(BIZ_TYPE, req.bizNo()).getTaskId(), true);
     }
     // ⚠ 触发时机：@Async 跑在另一线程，若在事务提交前触发，新线程读不到未提交的任务行
@@ -877,7 +881,7 @@ class ExportTaskExecutor {
     public void execute(String taskId) {
         if (taskMapper.tryMarkRunning(taskId) == 0) return;  // 没抢到执行权（重复触发 / 已取消），直接放弃
         try {
-            String resultUrl = doExport(taskId);             // 真正干活的业务方法
+            String resultUrl = doExport(taskId);             // 真正干活；进度经 taskMapper.updateProgress 回写
             taskMapper.markSuccess(taskId, resultUrl);
         } catch (Exception e) {
             taskMapper.markFailed(taskId, e.getMessage());   // 重试判断（retry_count，见 8.2）内含
@@ -885,11 +889,15 @@ class ExportTaskExecutor {
     }
 }
 
-// ===== ⑥ 兜底 Scheduler（8.3）：RUNNING 超时回收；重启遗留的 PENDING 由它重新触发 =====
+// ===== ⑥ 兜底 Scheduler（8.3）：RUNNING 超时回收 + 重启遗留 PENDING 重新触发 =====
 @Scheduled(fixedDelay = 60_000)
 public void rescueTimeoutTasks() {
     for (TaskDO t : taskMapper.findTimeoutRunning(LocalDateTime.now().minusMinutes(10))) {
-        taskMapper.markFailed(t.getTaskId(), "执行超时");    // 内含：未超 retry 上限回 PENDING、超限转 TIMEOUT
+        taskMapper.markFailed(t.getTaskId(), "执行超时");    // 超时按一次失败计入重试，重试耗尽停 FAILED
+        // （8.2 的 TIMEOUT 是可选的区分性终态；简化实现可并入 FAILED）
+    }
+    for (TaskDO t : taskMapper.findPending()) {              // 重启遗留 / 重试回队的 PENDING 重新触发，链路闭环
+        exportTaskExecutor.execute(t.getTaskId());           // tryMarkRunning 抢占执行权，天然防重复执行
     }
 }
 ```
