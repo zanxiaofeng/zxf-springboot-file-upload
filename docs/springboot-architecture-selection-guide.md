@@ -1,12 +1,13 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.5　|　日期：2026-09-22
+> 版本：v1.6　|　日期：2026-09-22
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
 > v1.3 修订：新增第八章"异步 + 轮询 API"专题；修复包结构复审问题（4.6 共享仓储违反"禁跨切片共享"规则、4.7 包名含连字符不合法、JPA 组件命名误导、A 方案 VO 口径、4.2 补消费入口等）。
 > v1.4 修订：修复决策流程 Q3=否 死路与兜底可达性、B 方案写链口径（Entity 兼 PO）、2.1 补微服务成九种、ArchUnit PO 规则对六边形布局失效、幂等命中状态码统一、@Async 自调用陷阱提示；补 4.2 client/task 包、4.5 bootstrap 内容；新增 2.3 管道（Pipe-Filter）维度与 4.9 Clean/Onion 包结构。复审补遗：4.1 补 listener/ 入口、3.2 垂直切片定时任务表述对齐 4.6、第五章补 Clean/Onion 行、2.3 措辞与 Verdict 结论对齐、4.9 ArchUnit 包名映射补全、8.6 改用 Mapper 词汇。
 > v1.5 修订：第三章概念体系补齐（① 实时通道/其他协议入口、② Repository/Port 接口与 Factory、③ Cache/对象存储出站依赖、④ VO 三途定义、"四类之外：横切与装配"定位说明、3.4 标题泛化）；新增第九章"事件驱动设计"专题（双形态对照、六环节生命周期与 AFTER_COMMIT 相位、事件本体设计与 Outbox 表字段、常见坑、各方案落位速查）。
+> v1.6 修订：新增 9.6"事件类的包结构安放"（7 角色安放铁律 + 逐方案落点表 + Spring 纯 POJO 发布前提）；第四章同步落位：4.1 补 event/、4.2 补 command/event/、4.3 补领域事件与进程内 Handler、4.4 补集成事件载荷、4.5 领域事件改为随聚合分包（修平铺矛盾）、4.6 补切片间事件通信、4.9 补事件三处落点。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航。
 
@@ -257,6 +258,8 @@ com.example.app
 │   ├── result/Result.java             # 统一响应包装
 │   ├── exception/BizException.java    # 业务异常 + ErrorCode 枚举
 │   └── enums/  constant/  util/
+├── event/                             # 进程内事件（见 9.6）：定义 + @TransactionalEventListener 订阅
+│   └── OrderPlacedEvent.java          #   发布在 Service；Spring 可直接发布纯 POJO
 ├── task/                              # @Scheduled / XXL-Job，直调 Service
 │   └── OrderTimeoutJob.java
 └── listener/                          # MQ 监听直调 Service（与 Controller/task 同为触发入口，须幂等）
@@ -281,6 +284,7 @@ com.example.app
 │   │   └── CancelOrderCmd.java
 │   ├── model/                         # 写模型实体（可贫血/半充血，JPA 下兼任 PO）
 │   │   └── Order.java
+│   ├── event/                         # 进程内事件（见 9.6）：定义 + 订阅 Handler，只属写侧
 │   ├── repository/                    # 写侧仓储（面向实体）
 │   │   └── OrderRepository.java
 │   ├── client/                        # 外部调用只挂写侧（读侧禁用）
@@ -299,7 +303,7 @@ com.example.app
 │   └── vo/                            # OrderListVO / OrderDetailVO / OrderExportVO
 └── common/                            # Result / 异常 / 枚举 / MapStruct 转换器
 ```
-规则：读写代码路径完全分离；读侧禁止经过写侧实体；只有写侧有写事务。
+规则：读写代码路径完全分离；读侧禁止经过写侧实体；只有写侧有写事务；事件只由写侧产生（读侧仅在引入读缓存时挂投影类 Consumer，见 9.6）。
 
 ### 4.3 C-① 六边形
 
@@ -308,7 +312,8 @@ com.example.app
 ├── domain/                                # 内核：纯 POJO，零框架、零 Spring 依赖
 │   ├── model/
 │   │   ├── Order.java                     # 实体（建议充血：行为内聚）
-│   │   └── OrderNo.java                   # 值对象
+│   │   ├── OrderNo.java                   # 值对象
+│   │   └── event/OrderPlacedEvent.java    #   领域事件：随聚合、纯 POJO（见 9.6）
 │   ├── service/
 │   │   └── OrderPricingService.java       # 领域服务：跨实体的领域逻辑
 │   └── port/
@@ -321,7 +326,9 @@ com.example.app
 │           └── EventPublisherPort.java    #   领域声明"我要发事件"
 ├── application/                           # 用例实现层：编排，无业务规则
 │   ├── PlaceOrderService.java             # implements PlaceOrderUseCase
-│   └── QueryOrderService.java             #   编排事务、调用 port.out 接口
+│   ├── QueryOrderService.java             #   编排事务、调用 port.out 接口
+│   └── event/
+│       └── OrderPlacedHandler.java        #   进程内订阅（@TransactionalEventListener，见 9.6）
 ├── adapter/
 │   ├── in/
 │   │   ├── web/                           # REST 入站适配器
@@ -339,7 +346,8 @@ com.example.app
 │       │   ├── repository/OrderJpaRepository.java  # Spring Data JPA（MyBatis 场景则用 mapper/）
 │       │   └── converter/OrderConverter.java # Model ↔ PO（MapStruct）
 │       ├── messaging/                     # MQ 发布出站适配器
-│       │   └── RocketMqEventPublisher.java   # implements EventPublisherPort
+│       │   ├── RocketMqEventPublisher.java   # implements EventPublisherPort
+│       │   └── event/OrderPlacedMsg.java     #   集成事件载荷 + 领域→集成翻译（见 9.6）
 │       └── client/                        # 外部服务出站适配器（防腐）
 │           ├── PaymentGatewayAdapter.java    # implements PaymentGatewayPort
 │           └── dto/                       #   外部报文，就地翻译不渗漏
@@ -391,6 +399,7 @@ com.example.app
 │   │   └── converter/OrderConverter.java  # 聚合 ↔ PO（MapStruct）
 │   ├── messaging/
 │   │   ├── outbox/                        # 发件箱表 + 轮询投递 Job
+│   │   ├── event/OrderPlacedMsg.java      #   集成事件载荷（契约非领域，见 9.6）
 │   │   └── MqProducer.java
 │   └── client/                            # 防腐层 ACL
 │       ├── payment/PaymentACL.java
@@ -420,8 +429,8 @@ com.example.app
 │       └── OrderQueryService.java         # 直奔 readstore，不碰 domain
 ├── domain/
 │   ├── model/order/                       # 聚合（同 4.4，按聚合分包）
+│   │   └── event/OrderPlacedEvent.java    #   领域事件随聚合（见 9.6）
 │   ├── service/
-│   ├── event/OrderPlacedEvent.java        # 领域事件定义
 │   └── port/out/                          # OrderRepositoryPort / EventBusPort
 ├── infrastructure/
 │   ├── persistence/                       # 写库：仓储实现（JPA/MyBatis）
@@ -449,7 +458,8 @@ com.example.app
 │   │   ├── CreateOrderHandler.java        #   该用例的全部编排逻辑
 │   │   ├── CreateOrderRepository.java     #   仓储切片私有，禁跨切片共享
 │   │   ├── CreateOrderRequest.java  CreateOrderResponse.java
-│   │   └── CreateOrderValidator.java
+│   │   ├── CreateOrderValidator.java
+│   │   └── OrderPlacedEvent.java          #   本切片对外契约：其他切片 import 订阅合法（见 9.6）
 │   ├── cancelorder/
 │   │   ├── CancelOrderController.java  CancelOrderHandler.java
 │   │   └── CancelOrderRequest.java
@@ -465,7 +475,7 @@ com.example.app
     ├── domain/Order.java                  # 共享实体（持久化各切片自决，不下沉仓储）
     └── common/                            # Result / 异常 / 枚举
 ```
-规则：切片间禁止互相调用；复用逻辑下沉 shared，下沉不了宁可复制；查询切片与命令切片并列（天然 CQRS）。
+规则：切片间禁止直接互相调用，通信用事件（产生切片定义、消费切片订阅，见 9.6）；复用逻辑下沉 shared，下沉不了宁可复制；查询切片与命令切片并列（天然 CQRS）。
 
 ### 4.7 模块化单体
 
@@ -516,19 +526,24 @@ com.example.app
 ├── domain/                                # 最内圈：实体 + 出站端口（Onion 惯例称 Gateway）
 │   ├── entity/
 │   │   ├── Order.java                     # 充血实体
-│   │   └── OrderNo.java                   # 值对象
+│   │   ├── OrderNo.java                   # 值对象
+│   │   └── event/OrderPlacedEvent.java    #   领域事件，纯 POJO（见 9.6）
 │   └── gateway/
 │       └── OrderRepositoryGateway.java    # 语义同 port.out：接口在圈内，实现在圈外
 ├── usecase/                               # 用例圈：入站端口 + 输出端口 + 用例实现
 │   ├── input/
 │   │   └── PlaceOrderInputPort.java       # 语义同 port.in，Controller 只依赖它
 │   ├── output/
-│   │   └── NotificationOutputPort.java
+│   │   └── NotificationOutputPort.java    # 出站端口（事件发布 EventPublisherOutputPort 同理，见 9.6）
+│   ├── event/
+│   │   └── OrderPlacedEventHandler.java   # 进程内订阅（@TransactionalEventListener）
 │   └── PlaceOrderInteractor.java          # 用例实现（Onion 惯例称 Interactor）
 ├── interfaceadapters/                     # 接口适配圈：入口协议 + 出站实现
 │   ├── web/
 │   │   ├── OrderController.java
 │   │   └── presenter/OrderPresenter.java  # 用例输出 → 视图模型，Controller 不见领域对象
+│   ├── messaging/
+│   │   └── OrderEventPublisherGateway.java #  集成事件载荷 + 领域→集成翻译 + MQ 发布（见 9.6）
 │   └── gateway/
 │       └── OrderRepositoryGatewayImpl.java
 └── frameworks/                            # 最外圈：框架驱动与装配
@@ -832,6 +847,36 @@ public void execute(String taskId) {
 | C | `EventPublisherPort` 出站端口 + 适配器实现（4.3）；DDD 四层 `application/event/` 订阅（4.4） | — |
 | D | 领域事件 → 集成事件强制走 Outbox；投影链更新读模型（8.4） | schema 版本化强制 |
 | E / 微服务 | 模块/服务间只走 api.event 集成事件（Spring Modulith 事件或 MQ）；领域事件不出模块 | 拆分时 api.event 直接映射 MQ Topic |
+
+### 9.6 事件类的包结构安放（第四章各方案的落点）
+
+事件相关类先按**角色**拆开，角色决定落包——共 7 种：
+
+| 角色 | 进程内/外 | 本质 | 安放铁律 |
+|---|---|---|---|
+| ① 领域事件定义（`OrderPlacedEvent`） | 进程内 | 领域概念（业务事实） | **随聚合** `domain/{聚合}/event/`，纯 POJO |
+| ② 事件收集机制（`registerEvent`/聚合基类） | 进程内 | 聚合行为 | domain，与实体同处 |
+| ③ 进程内订阅 Handler | 进程内 | 用例编排 | **application 层**——"事实发生后做什么"是用例，不是领域规则 |
+| ④ 发布端口（`EventPublisherPort`/`EventBusPort`） | 跨界 | 出站端口 | domain（Clean 放 usecase/output/），与仓储接口同级 |
+| ⑤ 集成事件定义（`order-placed.v1` 载荷） | 进程外 | **契约**，非领域概念 | 与 publisher 同处（infrastructure/messaging/）；跨模块/跨服务进 api 包 |
+| ⑥ 发布器 + 领域→集成翻译 + Outbox | 进程外 | 次适配器 | infrastructure/messaging/（翻译即 9.2 环节④） |
+| ⑦ 集成事件 Consumer | 进程外 | 入站适配器 | 与 Controller 平级的消费入口 |
+
+技术前提：**Spring 4.2+ 的 `ApplicationEventPublisher` 可发布任意 POJO**——领域事件无需继承 `ApplicationEvent`、不碰 Spring API，这是①能留在 domain 的关键。
+
+逐方案落点（与第四章包结构一一对应）：
+
+| 方案 | ① 领域事件 | ③ Handler | ④ 端口 | ⑤⑥ 集成侧 | ⑦ Consumer |
+|---|---|---|---|---|---|
+| A 4.1 | `event/` 根包（按业务分包后随业务包） | `event/` | —（直用 publisher） | — | `listener/` |
+| B 4.2 | `command/model/` 旁 | `command/event/` | — | 写侧发布（只 command） | 命令类 `command/consumer/`；投影类 `query/consumer/`（引入读缓存才有） |
+| 六边形 4.3 | `domain/model/event/` | `application/event/` | `domain/port/out/EventPublisherPort` | `adapter/out/messaging/`（载荷+翻译+发布） | `adapter/in/messaging/` |
+| DDD 四层 4.4 | `domain/{聚合}/event/` | `application/event/` | 仓储接口同级 | `infrastructure/messaging/`（含载荷） | `interfaces/consumer/` |
+| D 4.5 | `domain/model/{聚合}/event/` | `application/` | `domain/port/out/EventBusPort` | `infrastructure/messaging/` | `interfaces/consumer/`（命令/投影两类） |
+| 垂直切片 4.6 | **产生事件的切片内**（切片对外契约，消费切片 import 合法；事件基类下沉 `shared/`） | 消费切片内 | — | 切片自包含或 `shared/messaging/` | `consumer/` Router |
+| 模块化单体 4.7 | `internal/domain/{聚合}/event/` | `internal/application/event/` | —（直接发 api.event） | `api/event/` 契约 + `internal/infrastructure/messaging/` | 模块 internal 内 |
+| 微服务 4.8 | 服务内按所选 A~D | 同左 | 同左 | 跨服务一律 `xxx-api/event/schema/`（版本化） | 服务内 |
+| Clean 4.9 | `domain/entity/event/` | `usecase/event/` | `usecase/output/` | `interfaceadapters/messaging/` | interfaceadapters 下与 web 平级 |
 
 ---
 
