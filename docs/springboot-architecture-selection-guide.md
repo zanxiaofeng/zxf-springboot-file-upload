@@ -1,6 +1,6 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.6　|　日期：2026-09-22
+> 版本：v1.7　|　日期：2026-09-22
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
@@ -8,6 +8,7 @@
 > v1.4 修订：修复决策流程 Q3=否 死路与兜底可达性、B 方案写链口径（Entity 兼 PO）、2.1 补微服务成九种、ArchUnit PO 规则对六边形布局失效、幂等命中状态码统一、@Async 自调用陷阱提示；补 4.2 client/task 包、4.5 bootstrap 内容；新增 2.3 管道（Pipe-Filter）维度与 4.9 Clean/Onion 包结构。复审补遗：4.1 补 listener/ 入口、3.2 垂直切片定时任务表述对齐 4.6、第五章补 Clean/Onion 行、2.3 措辞与 Verdict 结论对齐、4.9 ArchUnit 包名映射补全、8.6 改用 Mapper 词汇。
 > v1.5 修订：第三章概念体系补齐（① 实时通道/其他协议入口、② Repository/Port 接口与 Factory、③ Cache/对象存储出站依赖、④ VO 三途定义、"四类之外：横切与装配"定位说明、3.4 标题泛化）；新增第九章"事件驱动设计"专题（双形态对照、六环节生命周期与 AFTER_COMMIT 相位、事件本体设计与 Outbox 表字段、常见坑、各方案落位速查）。
 > v1.6 修订：新增 9.6"事件类的包结构安放"（7 角色安放铁律 + 逐方案落点表 + Spring 纯 POJO 发布前提）；第四章同步落位：4.1 补 event/、4.2 补 command/event/、4.3 补领域事件与进程内 Handler、4.4 补集成事件载荷、4.5 领域事件改为随聚合分包（修平铺矛盾）、4.6 补切片间事件通信、4.9 补事件三处落点。复审补遗：3.2 A/B 行事件口径同步、7.1 VO 三途同步、9.6 B 行定义与 Handler 同包修正、4.6 事件基类落点、4.9 入站消费落点、7.2 domain 纯净规则适用范围补全、使用指南提及实战专题。
+> v1.7 修订：投影类 Consumer 口径补齐（3.2 B 行入口列、第五章 B 行，对齐 4.2/9.6 既有例外）；7.4 评分建议补第 1 题分水岭、修正第 2 题指向（对齐 1.1 的 Q2→B 口径）；9.6 铁律①与六边形行对齐（4.3/9.6 六边形领域事件改随聚合分包，与 4.5 同标准）；8.6 提交代码补幂等命中 200 分支；4.5 投影链跨层调用补务实偏离声明；8.3 默认执行器措辞修正（问题在队列无界而非"禁用默认"）；7.2 模块隔离规则补参数化说明。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八、九章】为实战专题（异步轮询、事件驱动），涉及相应场景时按需查阅。
 
@@ -171,7 +172,7 @@ com.example.app
 | 架构 | 入口适配器 | 核心业务 | 出口适配器 | 数据结构 |
 |---|---|---|---|---|
 | **A 经典分层** | controller/；task/、listener/ 直调 Service | service/（贫血过程式）；无聚合、无领域事件（进程内事件可选，见 4.1） | mapper/（DAO）；client/ 建议收敛；MQ 发送散在 service | DTO ↔ PO（entity 兼任业务对象，例外见 4.1 注）；无 Cmd/Query 之分，response 可用 VO 或直接复用 DO |
-| **B 轻量 CQRS** | 命令/查询 Controller 分离；消费端与定时任务只进写侧 | command 侧 service（规则唯一所在）、事件只写侧产生（见 9.6）；读侧无核心 | 写：repository；读：query.mapper 直出 SQL；client 仅写侧 | 写链 DTO → Cmd → Entity（兼 PO）；读链 Query → VO |
+| **B 轻量 CQRS** | 命令/查询 Controller 分离；消费端与定时任务只进写侧（投影类 Consumer 除外，见 4.2/9.6） | command 侧 service（规则唯一所在）、事件只写侧产生（见 9.6）；读侧无核心 | 写：repository；读：query.mapper 直出 SQL；client 仅写侧 | 写链 DTO → Cmd → Entity（兼 PO）；读链 Query → VO |
 | **六边形** | adapter 的 in.web / in.messaging / in.scheduler 三者并列，只做"翻译 + 调 port.in" | port.in 用例接口 + application 实现 + domain 模型与服务 | port.out 三端口 + adapter.out 三适配器（persistence / messaging / client） | DTO → Cmd → Model ↔ PO（转换在适配器内） |
 | **DDD 四层** | interfaces 下 rest / consumer / task 三者并列 | application（Cmd/Query、事务）+ domain（聚合、领域服务、领域事件、仓储接口） | infrastructure 下 persistence（仓储实现）/ client（ACL 防腐）/ messaging（publisher + outbox） | DTO → Cmd → Aggregate ↔ PO；事件双形态（领域 → 集成）；查询出 VO |
 | **D 全配置** | interfaces 下 rest（命令/查询分离）、consumer（含读模型投影）、task（对账补偿） | application.command（Handler）+ application.query + domain（聚合、事件、端口） | 写库 persistence + 读模型 readstore（ES/Redis）+ publisher（Outbox 强制）+ client（写路径慎用同步） | 读写两套：Cmd → Aggregate → DomainEvent → IntegrationEvent → 读模型 VO |
@@ -310,9 +311,9 @@ com.example.app
 ```
 com.example.app
 ├── domain/                                # 内核：纯 POJO，零框架、零 Spring 依赖
-│   ├── model/
-│   │   ├── Order.java                     # 实体（建议充血：行为内聚）
-│   │   ├── OrderNo.java                   # 值对象
+│   ├── model/order/                       # 按聚合分包：实体、值对象、领域事件
+│   │   ├── Order.java                     #   实体（建议充血：行为内聚）
+│   │   ├── OrderNo.java                   #   值对象
 │   │   └── event/OrderPlacedEvent.java    #   领域事件：随聚合、纯 POJO（见 9.6）
 │   ├── service/
 │   │   └── OrderPricingService.java       # 领域服务：跨实体的领域逻辑
@@ -438,6 +439,8 @@ com.example.app
 │   │   ├── OrderReadModelDAO.java
 │   │   └── OrderReadModelUpdater.java     # 投影更新器（被投影 Consumer 调用）
 │   │                                      # 投影链：投影 Consumer 直调 Updater，不经 application；HTTP 读链仍走 application.query
+│   │                                      # （务实偏离：投影链是"基础设施→基础设施"链路，interfaces→infrastructure
+│   │                                      #  的跨越是有意为之，不进经典四层依赖规则）
 │   ├── messaging/                         # Outbox → MQ 投递
 │   └── client/                            # 防腐层（写路径慎用同步调用）
 └── bootstrap/                             # 装配入口
@@ -563,7 +566,7 @@ com.example.app
 | 架构 | persistence | messaging | client |
 |---|---|---|---|
 | A 经典分层 | 最底层 DAO，Service 直接用 | 无正式位置，散在 Service；注意先发消息后提交事务的不一致坑 | 无正式位置；至少收敛 client/ 包管超时重试 |
-| B 轻量 CQRS | 写仓储 + 读查询 Mapper 分裂 | 消费路由到写侧命令 | 只允许写侧调用 |
+| B 轻量 CQRS | 写仓储 + 读查询 Mapper 分裂 | 消费路由到写侧命令；投影类 Consumer 挂读侧（引入读缓存时才有，见 4.2/9.6） | 只允许写侧调用 |
 | 六边形 | 出站端口 + 持久化适配器；PO 与领域分离 | 发布 = 出站端口；消费 = 入站适配器 | 出站端口 + 防腐适配器，外部 DTO 就地翻译 |
 | Clean/Onion | 同六边形（布局见 4.9） | 同六边形 | 同六边形 |
 | DDD 四层 | 领域仓储：接口在 domain、每聚合一个、实现在 infrastructure | 领域事件（内，同事务）/ 集成事件（外，MQ）+ Outbox | 防腐层 ACL，属上下文映射 |
@@ -645,7 +648,7 @@ class ArchitectureTest {
         noClasses().that().resideOutsideOfPackage("..adapter.out.persistence..")
             .should().dependOnClassesThat().resideInAPackage("..adapter.out.persistence.po..");
 
-    // 【适用 E】模块 internal 包禁止跨模块访问
+    // 【适用 E】模块 internal 包禁止跨模块访问（示例以 order 模块为例；实际每模块一条，或按模块名参数化生成）
     @ArchTest
     static final ArchRule 模块internal隔离 =
         noClasses().that().resideOutsideOfPackage("..order..")
@@ -686,7 +689,7 @@ class ArchitectureTest {
 9. 是否要求领域层可脱离 Spring 纯单测？
 10. 谁负责架构守护（ArchUnit 规则、Code Review 清单）？
 
-**评分建议**：2、5、6 答"是" → 在 C/D 中选；7 答"可接受最终一致" → 可考虑 D 的物理读写分离，答"强一致" → 留在 C 或 D 的逻辑分离形态；4、8 答"是" → 叠加 E 的模块化；3、5 答"否" → 降级 A/B。
+**评分建议**：1 是最根本分水岭——答"规则/状态机密集" → 候选 C/D，答"CRUD 为主" → A/B；2 答"是" → B（或在任意方案上叠加查询侧分离，见 1.1 约束三），不单独指向 C/D；5、6 答"是" → 支撑升级 C/D 的辅助论据；7 答"可接受最终一致" → 可考虑 D 的物理读写分离，答"强一致" → 留在 C 或 D 的逻辑分离形态；4、8 答"是" → 叠加 E 的模块化；3、5 答"否" → 降级 A/B。
 
 ---
 
@@ -726,7 +729,7 @@ UPDATE task SET status='RUNNING' WHERE task_id=? AND status='PENDING'
 
 | 实现 | 适用 | 要点 |
 |---|---|---|
-| @Async + 自建线程池 | 单机、任务轻、量小 | 必须自定义 ThreadPoolTaskExecutor（队列上限 + 拒绝策略），禁用默认执行器；重启丢任务 → 配 Scheduler 恢复扫描 PENDING |
+| @Async + 自建线程池 | 单机、任务轻、量小 | 默认执行器队列无界（含 Boot 自动装配的 applicationTaskExecutor），必须自定义 ThreadPoolTaskExecutor（队列上限 + 拒绝策略 + 线程命名）；重启丢任务 → 配 Scheduler 恢复扫描 PENDING |
 | MQ + Consumer | 分布式、量大、需削峰（推荐） | 任务表与发消息走 Outbox；消费幂等；复用 MQ 重试/死信 |
 | Scheduler 扫描 | 兜底角色 | 超时检测（RUNNING 超阈值 → 重试/TIMEOUT）、结果清理（expire_at） |
 
@@ -761,10 +764,13 @@ UPDATE task SET status='RUNNING' WHERE task_id=? AND status='PENDING'
 // ① 提交：首次 202 + Location + taskId；幂等命中（bizNo 已存在）→ 200 + 已有 taskId，不新建
 @PostMapping("/api/export-tasks")
 public ResponseEntity<TaskSubmitVO> submit(@RequestBody @Validated ExportTaskRequest req) {
-    String taskId = exportTaskService.submit(req);        // bizNo 命中则返回已有任务
-    return ResponseEntity.accepted()
-            .location(URI.create("/api/export-tasks/" + taskId))
-            .body(new TaskSubmitVO(taskId, 2));           // retryAfter 建议 2 秒
+    SubmitResult result = exportTaskService.submit(req);   // 内含 taskId 与是否幂等命中
+    if (result.duplicated()) {                             // bizNo 命中：200 返回已有任务，不新建
+        return ResponseEntity.ok(new TaskSubmitVO(result.taskId(), 2));
+    }
+    return ResponseEntity.accepted()                       // 首次提交：202 + Location
+            .location(URI.create("/api/export-tasks/" + result.taskId()))
+            .body(new TaskSubmitVO(result.taskId(), 2));   // retryAfter 建议 2 秒
 }
 
 // ② 轮询：读侧直出
@@ -872,7 +878,7 @@ public void execute(String taskId) {
 |---|---|---|---|---|---|
 | A 4.1 | `event/` 根包（按业务分包后随业务包） | `event/` | —（直用 publisher） | — | `listener/` |
 | B 4.2 | `command/event/`（定义与 Handler 同包） | `command/event/` | — | 写侧发布（只 command） | 命令类 `command/consumer/`；投影类 `query/consumer/`（引入读缓存才有） |
-| 六边形 4.3 | `domain/model/event/` | `application/event/` | `domain/port/out/EventPublisherPort` | `adapter/out/messaging/`（载荷+翻译+发布） | `adapter/in/messaging/` |
+| 六边形 4.3 | `domain/model/{聚合}/event/` | `application/event/` | `domain/port/out/EventPublisherPort` | `adapter/out/messaging/`（载荷+翻译+发布） | `adapter/in/messaging/` |
 | DDD 四层 4.4 | `domain/{聚合}/event/` | `application/event/` | 仓储接口同级 | `infrastructure/messaging/`（含载荷） | `interfaces/consumer/` |
 | D 4.5 | `domain/model/{聚合}/event/` | `application/`（D 的事件主走 MQ 投影，进程内订阅少） | `domain/port/out/EventBusPort` | `infrastructure/messaging/` | `interfaces/consumer/`（命令/投影两类） |
 | 垂直切片 4.6 | **产生事件的切片内**（切片对外契约，消费切片 import 合法；事件基类下沉 `shared/`） | 消费切片内 | — | 切片自包含或 `shared/messaging/` | `consumer/` Router |
