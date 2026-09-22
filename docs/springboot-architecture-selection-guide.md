@@ -1,6 +1,6 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.7　|　日期：2026-09-22
+> 版本：v1.8　|　日期：2026-09-23
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
@@ -9,6 +9,7 @@
 > v1.5 修订：第三章概念体系补齐（① 实时通道/其他协议入口、② Repository/Port 接口与 Factory、③ Cache/对象存储出站依赖、④ VO 三途定义、"四类之外：横切与装配"定位说明、3.4 标题泛化）；新增第九章"事件驱动设计"专题（双形态对照、六环节生命周期与 AFTER_COMMIT 相位、事件本体设计与 Outbox 表字段、常见坑、各方案落位速查）。
 > v1.6 修订：新增 9.6"事件类的包结构安放"（7 角色安放铁律 + 逐方案落点表 + Spring 纯 POJO 发布前提）；第四章同步落位：4.1 补 event/、4.2 补 command/event/、4.3 补领域事件与进程内 Handler、4.4 补集成事件载荷、4.5 领域事件改为随聚合分包（修平铺矛盾）、4.6 补切片间事件通信、4.9 补事件三处落点。复审补遗：3.2 A/B 行事件口径同步、7.1 VO 三途同步、9.6 B 行定义与 Handler 同包修正、4.6 事件基类落点、4.9 入站消费落点、7.2 domain 纯净规则适用范围补全、使用指南提及实战专题。
 > v1.7 修订：投影类 Consumer 口径补齐（3.2 B 行入口列、第五章 B 行，对齐 4.2/9.6 既有例外）；7.4 评分建议补第 1 题分水岭、修正第 2 题指向（对齐 1.1 的 Q2→B 口径）；9.6 铁律①与六边形行对齐（4.3/9.6 六边形领域事件改随聚合分包，与 4.5 同标准）；8.6 提交代码补幂等命中 200 分支；4.5 投影链跨层调用补务实偏离声明；8.3 默认执行器措辞修正（问题在队列无界而非"禁用默认"）；7.2 模块隔离规则补参数化说明。
+> v1.8 修订：第四章包结构示例补齐全部空包内容（4.1 dto/config/common、4.2 event/vo/common、4.3 web dto/assembler 与 client dto、4.4 interfaces dto/command/inventory/shared/outbox/client dto/common、4.5 task/domain/persistence/messaging/client、4.6 shared common、4.7 internal domain/infrastructure、4.9 frameworks config 均给出代表类）；8.6 最小代码骨架由三段扩为完整链路六段（状态枚举与 VO、TaskMapper 条件更新、提交 Service 幂等三态、提交/轮询接口、线程池装配、@Async 独立执行器、兜底 Scheduler），并新增"事务提交前触发 @Async 读不到任务行"的时机坑提示（afterCommit 注册）。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八、九章】为实战专题（异步轮询、事件驱动），涉及相应场景时按需查阅。
 
@@ -250,15 +251,21 @@ com.example.app
 │   ├── UserDO.java
 │   └── OrderDO.java
 ├── dto/
-│   ├── request/                       # CreateUserRequest（@Validated 分组校验）
-│   └── response/                      # UserVO / OrderVO
+│   ├── request/
+│   │   └── CreateUserRequest.java     # @Validated 分组校验
+│   └── response/
+│       ├── UserVO.java
+│       └── OrderVO.java
 ├── convert/                           # MapStruct 转换器：DTO ↔ DO（PO）
 │   └── UserConvert.java
-├── config/                            # SecurityConfig / SwaggerConfig / RedisConfig
+├── config/
+│   ├── SecurityConfig.java
+│   └── SwaggerConfig.java             # RedisConfig 等同层
 ├── common/
 │   ├── result/Result.java             # 统一响应包装
 │   ├── exception/BizException.java    # 业务异常 + ErrorCode 枚举
-│   └── enums/  constant/  util/
+│   ├── enums/OrderStatusEnum.java     # 状态枚举
+│   └── util/JsonUtils.java
 ├── event/                             # 进程内事件（见 9.6）：定义 + @TransactionalEventListener 订阅
 │   └── OrderPlacedEvent.java          #   发布在 Service；Spring 可直接发布纯 POJO
 ├── task/                              # @Scheduled / XXL-Job，直调 Service
@@ -285,7 +292,9 @@ com.example.app
 │   │   └── CancelOrderCmd.java
 │   ├── model/                         # 写模型实体（可贫血/半充血，JPA 下兼任 PO）
 │   │   └── Order.java
-│   ├── event/                         # 进程内事件（见 9.6）：定义 + 订阅 Handler，只属写侧
+│   ├── event/                         # 进程内事件（见 9.6）：定义 + 订阅 Handler 同包，只属写侧
+│   │   ├── OrderPlacedEvent.java
+│   │   └── OrderEventHandler.java     #   @TransactionalEventListener 订阅
 │   ├── repository/                    # 写侧仓储（面向实体）
 │   │   └── OrderRepository.java
 │   ├── client/                        # 外部调用只挂写侧（读侧禁用）
@@ -301,8 +310,11 @@ com.example.app
 │   │   └── OrderQueryService.java         # 只读，无写事务
 │   ├── mapper/
 │   │   └── OrderQueryMapper.java          # 联表/聚合 SQL，直出 VO
-│   └── vo/                            # OrderListVO / OrderDetailVO / OrderExportVO
+│   └── vo/
+│       ├── OrderListVO.java           # 列表 / 详情 / 导出众 VO
+│       └── OrderDetailVO.java
 └── common/                            # Result / 异常 / 枚举 / MapStruct 转换器
+    └── Result.java
 ```
 规则：读写代码路径完全分离；读侧禁止经过写侧实体；只有写侧有写事务；事件只由写侧产生（读侧仅在引入读缓存时挂投影类 Consumer，见 9.6）。
 
@@ -334,7 +346,8 @@ com.example.app
 │   ├── in/
 │   │   ├── web/                           # REST 入站适配器
 │   │   │   ├── OrderController.java       #   只依赖 port.in 接口
-│   │   │   ├── dto/  assembler/           #   DTO ↔ Cmd/VO（MapStruct）
+│   │   │   ├── dto/PlaceOrderRequest.java
+│   │   │   ├── assembler/OrderWebAssembler.java  # DTO ↔ Cmd/VO（MapStruct）
 │   │   │   └── WebExceptionHandler.java
 │   │   ├── messaging/                     # MQ 消费入站适配器
 │   │   │   └── PaymentCallbackConsumer.java  # 消息→Cmd→port.in，幂等
@@ -351,7 +364,7 @@ com.example.app
 │       │   └── event/OrderPlacedMsg.java     #   集成事件载荷 + 领域→集成翻译（见 9.6）
 │       └── client/                        # 外部服务出站适配器（防腐）
 │           ├── PaymentGatewayAdapter.java    # implements PaymentGatewayPort
-│           └── dto/                       #   外部报文，就地翻译不渗漏
+│           └── dto/PaymentDeductRequest.java #   外部报文，就地翻译不渗漏
 └── bootstrap/                             # 装配入口
     ├── AppApplication.java
     └── config/BeanConfig.java             # 用 @Bean 将实现装配到 port 接口
@@ -366,14 +379,18 @@ com.example.app
 │   ├── rest/
 │   │   ├── OrderController.java
 │   │   └── assembler/OrderDTOAssembler.java   # DTO ↔ Cmd/VO
-│   ├── dto/                               # PlaceOrderRequest / OrderVO
+│   ├── dto/
+│   │   ├── PlaceOrderRequest.java
+│   │   └── OrderVO.java
 │   ├── consumer/                          # MQ 消费者（另一种入口）
 │   │   └── StockDeductedConsumer.java
 │   └── task/                              # 定时入口
 │       └── OrderTimeoutJob.java           #   超时关单扫描→应用服务
 ├── application/                           # 应用层：用例编排、事务边界
 │   ├── OrderAppService.java               #   加载聚合→调聚合行为→仓储保存
-│   ├── command/                           # PlaceOrderCmd / CancelOrderCmd
+│   ├── command/
+│   │   ├── PlaceOrderCmd.java
+│   │   └── CancelOrderCmd.java
 │   ├── query/                             # 查询用例（轻 CQRS 挂这里）
 │   │   ├── OrderDetailQuery.java
 │   │   └── OrderQueryService.java
@@ -391,7 +408,10 @@ com.example.app
 │   │   └── event/
 │   │       └── OrderPlacedEvent.java      # 领域事件
 │   ├── inventory/                         # 另一个聚合（同构）
+│   │   ├── Inventory.java
+│   │   └── event/StockDeductedEvent.java
 │   └── shared/                            # 共享值对象、通用枚举
+│       └── Money.java
 ├── infrastructure/
 │   ├── persistence/
 │   │   ├── OrderRepositoryImpl.java       # implements domain 的仓储接口
@@ -399,13 +419,17 @@ com.example.app
 │   │   ├── repository/OrderJpaRepository.java  # MyBatis 场景则用 mapper/
 │   │   └── converter/OrderConverter.java  # 聚合 ↔ PO（MapStruct）
 │   ├── messaging/
-│   │   ├── outbox/                        # 发件箱表 + 轮询投递 Job
+│   │   ├── outbox/
+│   │   │   ├── OutboxMessage.java         #   发件箱表实体（字段见 9.3）
+│   │   │   └── OutboxRelayJob.java        #   轮询投递 Job
 │   │   ├── event/OrderPlacedMsg.java      #   集成事件载荷（契约非领域，见 9.6）
 │   │   └── MqProducer.java
 │   └── client/                            # 防腐层 ACL
 │       ├── payment/PaymentACL.java
-│       └── dto/                           # 外部模型就地翻译
+│       └── dto/PaymentDeductRequest.java  # 外部模型就地翻译
 └── common/
+    ├── Result.java
+    └── BizException.java
 ```
 规则：interfaces→application→domain，infrastructure 依赖倒置实现 domain 接口；跨聚合只引用聚合根 ID；**一个事务原则上只修改一个聚合**，跨聚合一致性走领域事件/最终一致；业务 if-else 长在聚合里而非 AppService。
 
@@ -420,7 +444,9 @@ com.example.app
 │   ├── consumer/
 │   │   ├── PaymentResultConsumer.java     # 集成消费：消息→命令 Handler
 │   │   └── OrderProjectionConsumer.java   # 投影消费：事件→更新读模型
-│   └── task/                              # 对账、补偿、Outbox 轮询
+│   └── task/
+│       ├── OrderReconcileJob.java         # 对账、补偿
+│       └── OutboxRelayJob.java            # Outbox 轮询投递
 ├── application/
 │   ├── command/
 │   │   ├── PlaceOrderCmd.java
@@ -430,19 +456,26 @@ com.example.app
 │       └── OrderQueryService.java         # 直奔 readstore，不碰 domain
 ├── domain/
 │   ├── model/order/                       # 聚合（同 4.4，按聚合分包）
+│   │   ├── Order.java                     #   聚合根（充血）
 │   │   └── event/OrderPlacedEvent.java    #   领域事件随聚合（见 9.6）
-│   ├── service/
-│   └── port/out/                          # OrderRepositoryPort / EventBusPort
+│   ├── service/OrderDomainService.java    # 跨聚合领域逻辑
+│   └── port/out/
+│       ├── OrderRepositoryPort.java
+│       └── EventBusPort.java
 ├── infrastructure/
 │   ├── persistence/                       # 写库：仓储实现（JPA/MyBatis）
+│   │   ├── OrderRepositoryImpl.java
+│   │   └── po/OrderPO.java
 │   ├── readstore/                         # 读模型：ES / Redis / 读库
 │   │   ├── OrderReadModelDAO.java
 │   │   └── OrderReadModelUpdater.java     # 投影更新器（被投影 Consumer 调用）
 │   │                                      # 投影链：投影 Consumer 直调 Updater，不经 application；HTTP 读链仍走 application.query
 │   │                                      # （务实偏离：投影链是"基础设施→基础设施"链路，interfaces→infrastructure
 │   │                                      #  的跨越是有意为之，不进经典四层依赖规则）
-│   ├── messaging/                         # Outbox → MQ 投递
-│   └── client/                            # 防腐层（写路径慎用同步调用）
+│   ├── messaging/
+│   │   ├── OutboxRelayJob.java            # Outbox → MQ 投递
+│   │   └── event/OrderPlacedMsg.java      #   集成事件载荷（见 9.6）
+│   └── client/PaymentACL.java             # 防腐层（写路径慎用同步调用）
 └── bootstrap/                             # 装配入口
     ├── AppApplication.java
     └── config/
@@ -478,6 +511,7 @@ com.example.app
     ├── domain/Order.java                  # 共享实体（持久化各切片自决，不下沉仓储）
     ├── event/DomainEvent.java             # 事件基类（切片事件契约，见 9.6）
     └── common/                            # Result / 异常 / 枚举
+        └── Result.java
 ```
 规则：切片间禁止直接互相调用，通信用事件（产生切片定义、消费切片订阅，见 9.6）；复用逻辑下沉 shared，下沉不了宁可复制；查询切片与命令切片并列（天然 CQRS）。
 
@@ -493,12 +527,14 @@ com.example.app
 │   └── internal/                        # 模块内部（对外不可见）
 │       ├── controller/OrderController.java
 │       ├── application/OrderAppService.java
-│       ├── domain/                      #   本模块自选结构（这里用 DDD）
-│       ├── infrastructure/
+│       ├── domain/Order.java            #   本模块自选结构（这里用 DDD）
+│       ├── infrastructure/persistence/OrderRepositoryImpl.java
 │       └── InternalConfig.java
 ├── inventory/
 │   ├── api/  (InventoryFacade + dto + event)
 │   └── internal/                        #   本模块可以是简单三层
+│       ├── controller/InventoryController.java
+│       └── service/InventoryService.java
 ├── payment/  user/                      # 同构：api/ + internal/
 └── sharedkernel/                        # 通用语言内核（Java 包名不能含连字符）
     ├── Money.java  PageQuery.java       # 共享值对象、基础类型
@@ -553,7 +589,7 @@ com.example.app
 │       └── OrderRepositoryGatewayImpl.java
 └── frameworks/                            # 最外圈：框架驱动与装配
     ├── AppApplication.java
-    └── config/
+    └── config/BeanConfig.java             # @Bean 将实现装配到端口
 ```
 规则：依赖只朝内（entities ← usecases ← interfaceadapters ← frameworks）；领域层零框架依赖可纯单测；4.3 的 ArchUnit 守护规则同样适用（包名映射：`adapter`→`interfaceadapters`、`bootstrap`→`frameworks`、`application`→`usecase`）。
 
@@ -758,38 +794,102 @@ UPDATE task SET status='RUNNING' WHERE task_id=? AND status='PENDING'
 6. **结果生命周期**：大结果不进任务表，放 OSS/临时 URL，`expire_at` 到期由清理 Job 回收；
 7. **安全**：taskId 用不可猜测的 UUID；查询校验任务归属（越权读他人任务进度也是漏洞）。
 
-### 8.6 最小代码骨架（方案 A 语境）
+### 8.6 最小代码骨架（方案 A 语境，完整链路）
 
 ```java
-// ① 提交：首次 202 + Location + taskId；幂等命中（bizNo 已存在）→ 200 + 已有 taskId，不新建
+// ===== 状态机与 VO =====
+enum TaskStatus { PENDING, RUNNING, SUCCESS, FAILED, TIMEOUT, CANCELLED } // 终态不可逆（8.2）
+
+record TaskSubmitVO(String taskId, int retryAfter) {}                        // retryAfter：建议轮询间隔（秒）
+record TaskStatusVO(String status, int progress, String resultUrl, String error) {}
+record SubmitResult(String taskId, boolean duplicated) {}                    // duplicated=true 表示幂等命中
+
+// ===== Mapper：状态推进全部走条件更新（8.2）=====
+interface TaskMapper {
+    void insert(TaskDO task);                                // biz_type + biz_no 唯一索引，冲突抛 DuplicateKeyException
+    TaskDO findByBizNo(String bizType, String bizNo);
+    TaskDO findById(String taskId);
+
+    @Update("UPDATE task SET status='RUNNING' WHERE task_id=#{taskId} AND status='PENDING'")
+    int tryMarkRunning(String taskId);                       // 影响行数 = 1 才算抢到执行权，天然防并发重复执行
+
+    void markSuccess(String taskId, String resultUrl);
+    void markFailed(String taskId, String errorMsg);         // retry_count+1；未达上限回 PENDING 等待重试，超限转 TIMEOUT
+    List<TaskDO> findTimeoutRunning(LocalDateTime deadline); // 供兜底扫描
+}
+
+// ===== ① 提交（Service）：幂等 = 先查 + 唯一索引兜底 =====
+@Transactional
+public SubmitResult submit(ExportTaskRequest req) {
+    TaskDO existing = taskMapper.findByBizNo(BIZ_TYPE, req.bizNo());
+    if (existing != null) {                                  // 幂等命中：返回已有任务，不新建
+        return new SubmitResult(existing.getTaskId(), true);
+    }
+    TaskDO task = TaskDO.pending(BIZ_TYPE, req.bizNo(), JsonUtils.toJson(req));
+    try {
+        taskMapper.insert(task);
+    } catch (DuplicateKeyException e) {                      // 并发双提交：唯一索引兜底，转成查已有
+        return new SubmitResult(taskMapper.findByBizNo(BIZ_TYPE, req.bizNo()).getTaskId(), true);
+    }
+    // ⚠ 触发时机：@Async 跑在另一线程，若在事务提交前触发，新线程读不到未提交的任务行
+    //   → 注册 afterCommit 回调，提交成功后再触发（或把触发挪到事务方法返回之后）
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override public void afterCommit() { exportTaskExecutor.execute(task.getTaskId()); }
+    });
+    return new SubmitResult(task.getTaskId(), false);
+}
+
+// ===== ② 提交接口：首次 202 + Location + taskId；幂等命中 200 + 已有 taskId（8.5-1）=====
 @PostMapping("/api/export-tasks")
 public ResponseEntity<TaskSubmitVO> submit(@RequestBody @Validated ExportTaskRequest req) {
-    SubmitResult result = exportTaskService.submit(req);   // 内含 taskId 与是否幂等命中
-    if (result.duplicated()) {                             // bizNo 命中：200 返回已有任务，不新建
+    SubmitResult result = exportTaskService.submit(req);
+    if (result.duplicated()) {                               // bizNo 命中：200 返回已有任务
         return ResponseEntity.ok(new TaskSubmitVO(result.taskId(), 2));
     }
-    return ResponseEntity.accepted()                       // 首次提交：202 + Location
+    return ResponseEntity.accepted()                         // 首次提交：202 + Location
             .location(URI.create("/api/export-tasks/" + result.taskId()))
-            .body(new TaskSubmitVO(result.taskId(), 2));   // retryAfter 建议 2 秒
+            .body(new TaskSubmitVO(result.taskId(), 2));     // retryAfter 建议 2 秒
 }
 
-// ② 轮询：读侧直出
+// ===== ③ 轮询接口：读侧直出 =====
 @GetMapping("/api/export-tasks/{taskId}")
 public TaskStatusVO status(@PathVariable String taskId) {
-    return exportTaskService.queryStatus(taskId);         // status/progress/resultUrl/error
+    return exportTaskService.queryStatus(taskId);            // status/progress/resultUrl/error；校验任务归属（8.5-7）
 }
 
-// ③ 执行：@Async 单机版（分布式换 MQ Consumer，业务逻辑同一处）
-// ⚠ @Async 自调用失效：在 submit() 同类里直接调 this.execute(taskId) 不走代理、异步静默失效；
-//    须经代理调用（拆独立 TaskExecutor Bean / 注入自身代理 / 由提交链路之外触发）
-@Async("taskExecutor")
-public void execute(String taskId) {
-    if (!taskMapper.tryMarkRunning(taskId)) return;   // 条件更新抢执行权
-    try {
-        String resultUrl = doExport(taskId);
-        taskMapper.markSuccess(taskId, resultUrl);
-    } catch (Exception e) {
-        taskMapper.markFailed(taskId, e.getMessage()); // 重试判断（retry_count，见 8.2）略
+// ===== ④ 执行器线程池（8.3：有界队列 + 拒绝策略 + 线程命名；勿用默认无界队列）=====
+@Bean("taskExecutor")
+public ThreadPoolTaskExecutor taskExecutor() {
+    var executor = new ThreadPoolTaskExecutor();
+    executor.setCorePoolSize(4);
+    executor.setMaxPoolSize(8);
+    executor.setQueueCapacity(200);
+    executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+    executor.setThreadNamePrefix("export-task-");
+    return executor;
+}
+
+// ===== ⑤ 异步执行：独立 Bean（分布式换 MQ Consumer，业务逻辑同一处）=====
+// ⚠ @Async 自调用失效：同类里 this.execute(taskId) 不走代理、异步静默失效——执行器必须拆独立 Bean
+@Component
+class ExportTaskExecutor {
+    @Async("taskExecutor")
+    public void execute(String taskId) {
+        if (taskMapper.tryMarkRunning(taskId) == 0) return;  // 没抢到执行权（重复触发 / 已取消），直接放弃
+        try {
+            String resultUrl = doExport(taskId);             // 真正干活的业务方法
+            taskMapper.markSuccess(taskId, resultUrl);
+        } catch (Exception e) {
+            taskMapper.markFailed(taskId, e.getMessage());   // 重试判断（retry_count，见 8.2）内含
+        }
+    }
+}
+
+// ===== ⑥ 兜底 Scheduler（8.3）：RUNNING 超时回收；重启遗留的 PENDING 由它重新触发 =====
+@Scheduled(fixedDelay = 60_000)
+public void rescueTimeoutTasks() {
+    for (TaskDO t : taskMapper.findTimeoutRunning(LocalDateTime.now().minusMinutes(10))) {
+        taskMapper.markFailed(t.getTaskId(), "执行超时");    // 内含：未超 retry 上限回 PENDING、超限转 TIMEOUT
     }
 }
 ```
