@@ -171,34 +171,48 @@ curl http://localhost:8080/actuator/health
 ## 项目结构
 
 ```
-src/main/java/zxf/upload/
+src/main/java/zxf/upload/                 # 六边形骨架 + 管道核心 + 受理边 CQRS（两个限界上下文：FileUpload / FileScan）
 ├── FileUploadApplication.java      # 启动类
-├── control/
-│   ├── FileSyncUploadController.java   # 同步上传端点
-│   └── FileAsyncUploadController.java  # 异步上传 / 轮询 / SSE 端点
-├── service/
-│   ├── StagingService.java         # 上传文件同步落盘
-│   ├── VirusScanService.java       # 扫描管道编排 + Semaphore 背压
-│   ├── FileTypeValidator.java      # Tika 类型校验 + ZIP 炸弹防护
-│   ├── ClamAvScanner.java          # ClamAV INSTREAM 客户端
-│   ├── YaraScanner.java            # YARA 规则扫描
-│   ├── DocumentThreatScanner.java  # 宏 / ActiveX / PDF 危险动作检测
-│   ├── FileStorageService.java     # 入库 / 隔离
-│   └── AsyncScanProcessor.java     # 异步扫描 + SSE 推送 + 结果缓存
-├── config/
-│   ├── VirusScanProperties.java    # zxf.virus-scan.* 配置
-│   └── AsyncConfig.java            # 虚拟线程异步执行器
-├── model/                          # ScanResult / UploadResponse / ErrorCode / 业务异常
-└── support/
-    ├── ClamAvHealthIndicator.java  # ClamAV 健康检查
-    ├── rest/GlobalExceptionHandler.java  # 统一错误响应
-    └── io/FileUtils.java
-
-src/main/resources/
-├── application.yml
-└── rules/malware.yar               # YARA 自定义规则
-
-docker/docker-compose.yml           # ClamAV 1.4.5（含健康检查）
+├── domain/                         # 领域层（application 按同名列对称）
+│   ├── fileupload/                     # FileUpload 域（上游：文件模型 / 受理 / 保管）
+│   │   ├── UploadFile.java             # 值对象：原始名 + 大小 + 暂存路径（不可变）
+│   │   └── UploadPolicy.java           # 预检规则：空文件 / 大小 / 扩展名白名单 / 同步路由阈值
+│   └── filescan/                       # FileScan 域（下游：消费 staged 文件，产出结论与处置指令）
+│       ├── FileDisposition.java        # 处置映射：CLEAN→入库、INFECTED→隔离、其余→清理（消费 ScanStatus）
+│       ├── ScanStage.java              # 过滤器接口（零 infra 依赖的领域机制）
+│       ├── ScanVerdict.java            # sealed 结论：Passed / Infected / Rejected / Flagged
+│       ├── ScanContext.java            # 管道上下文（detectedMime 阶段间传递）
+│       ├── ScanPipeline.java           # 按序执行 + 短路
+│       ├── model/                      # ScanResult（不可变+工厂）/ ScanStatus / TypeCheck
+│       └── documentthreat/             # DocumentThreat / ThreatKind（canBeFlagged）/ DocumentThreatScanner
+├── application/                    # 应用层：限界上下文的用例与组件
+│   ├── ApplicationService.java         # 唯一门面：fileSyncUpload / fileAsyncUpload / fileScanStatus
+│   ├── fileupload/                     # FileUpload 用例
+│   │   ├── UploadFileCommand.java          # 写命令（record，携带上传输入与内容流）
+│   │   ├── UploadFileCommandChecker.java   # 只读校验（委托 UploadPolicy）
+│   │   ├── SyncUploadCommandExecutor.java  # 落盘 → 全管道扫描 → 结果翻译
+│   │   └── AsyncUploadCommandExecutor.java # 落盘 → scanId 受理 → 异步分发
+│   └── filescan/                       # FileScan 组件
+│       ├── ScanPipelineConfig.java         # 阶段顺序显式装配（顺序即领域规则）
+│       ├── stage/                          # FileType（Tika+ZIP 防护）/ ClamAv / Yara / DocumentThreat 实现
+│       ├── FileScanService.java            # Semaphore 背压 + 处置执行 + fail 策略收口
+│       ├── AsyncScanProcessor.java         # 异步任务分发 + 结果缓存 + SSE 推送
+│       └── PollScanResultExecutor.java     # 轮询兜底（直收 scanId）
+├── infrastructure/                 # 基础设施层：技术组件（次适配器）
+│   ├── domain/                         # BusinessException + ErrorCode 异常体系
+│   ├── rest/GlobalExceptionHandler.java # 统一错误响应（单一出口）
+│   ├── filescan/                       # ClamAvScanner / YaraScanner（外部引擎客户端）
+│   ├── fileupload/                     # StagingService（纯落盘 IO）/ FileStorageService（入库/隔离）
+│   ├── config/                         # FileScanProperties / AsyncConfig / FileUploadDomainConfig（领域策略装配）
+│   ├── health/ClamAvHealthIndicator.java # ClamAV 健康检查
+│   └── io/FileUtils.java
+└── rest/                           # 接入层：HTTP ↔ Command 协议转换（零业务逻辑，主适配器）
+    ├── fileupload/                     # 受理端点（FileUpload 域）
+    │   ├── FileSyncUploadController.java   # POST /api/files/sync/upload
+    │   └── FileAsyncUploadController.java  # POST /api/files/async/upload
+    ├── filescan/                       # 查询端点（FileScan 域）
+    │   └── ScanResultController.java       # GET /api/files/async/scan/{scanId}[/events]
+    └── file/representation/UploadResponse.java  # 响应模型（record，受理与查询共用）
 ```
 
 ## 文档

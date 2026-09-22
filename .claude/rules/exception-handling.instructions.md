@@ -51,6 +51,8 @@ paths:
 
 > **折中形态（模式 C，行业常见）：** 浅层次语义基类——按**处置类别**分 4~6 个（`NotFoundException` / `ConflictException` / `ValidationException` … extends `BusinessException`），组内用 `ErrorCode` 细化。catch 想粗就粗（按基类）、想细就细（比对 code），兼顾类型级分流与错误目录集中，适合中大型项目。
 
+**本项目选型 = 模式 B：** `BusinessException` + `ErrorCode` 单体系（静态工厂 `rejected/virusDetected/scanFailed`，未引入模式 C 语义子类）；落点与消息分级见 `project-architecture.instructions.md` §4。
+
 **纪律：** 选型在项目启动时确定并记入项目 agent 指南（`AGENTS.md`）；中途切换须全量迁移（业务代码 + 全局处理映射 + 测试断言）。**模式 A 与 B 禁止并存**；模式 C 是 B 的整体补充形态（同一基类层次内的粗/细两级 catch），采用后同样全项目统一。
 
 **本 harness 参考实现采用模式 C（浅层语义基类）**：`BusinessException` + `ErrorCode` 枚举为主体，辅以按 HTTP 处置类别的语义子类 `NotFoundException`（404）/ `ConflictException`（409）（`application/exception/`）。体系结构见 §3。采用本 harness 的项目按上表判据选定模式并在各自 `AGENTS.md` 中记录。

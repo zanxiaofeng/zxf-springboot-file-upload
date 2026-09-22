@@ -12,6 +12,8 @@ paths:
 
 基于分层架构与 CQRS-lite（Command/Query 分离 + ApplicationService 门面）的四层架构最佳实践。适用于 Spring Boot 4.x + JPA（Hibernate 7）项目。
 
+> **本项目适用范围：** 本篇的 CQRS-lite 受理结构（门面 + Command/Checker/Executor + Query）在本项目**仅适用于受理边**（上传受理与轮询查询这两个薄用例）。本项目整体采用**六边形架构（Ports & Adapters）骨架 + 扫描管道（Pipe-Filter）核心域**——核心域的阶段顺序/短路/宏策略等规则由管道模式组织，不适用本篇的用例编排形态。完整叙事、组件映射与已声明偏离见 `project-architecture.instructions.md`（冲突时以该篇为准）。
+
 > **职责边界：** 本文件定义**分层规则、包结构、各层职责概述、跨领域关注点、反模式**。各层的详细编码规范见对应专题文件（见文末导航表）。
 
 ***
