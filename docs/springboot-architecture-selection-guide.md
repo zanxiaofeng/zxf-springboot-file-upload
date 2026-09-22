@@ -1,6 +1,6 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.11　|　日期：2026-09-23
+> 版本：v1.12　|　日期：2026-09-23
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
@@ -13,8 +13,9 @@
 > v1.9 修订：第五次全面复审修复五处——8.6 markFailed 重试耗尽终态口径对齐 8.2 状态机（超限停 FAILED，TIMEOUT 改为可选的区分性终态说明）；8.6 ⑥ 补 PENDING 重新触发闭环（findPending + execute，修复"markFailed 回 PENDING 后无人触发"的链路缺口）；4.5 去除 OutboxRelayJob 双包重复（infrastructure/messaging/ 改放 OutboxMessage 表实体，轮询触发归 interfaces/task，对齐 9.6 ⑥ 与 3.4）；8.6 补 progress 回写来源（updateProgress）；8.6 ① 补 PG 事务 aborted 限定注（DuplicateKeyException 同事务续查仅 MySQL 语义）。
 > v1.10 修订：再次全面复审修复三处——4.5 messaging/ 补 MqProducer 投递发送方（v1.9 去重后该包无发送角色，且 9.6 ⑥ 要求发布器在 infrastructure/messaging/）；4.4 domain/shared/ 补 EventPublisher 发布端口（9.6 ④ 给 DDD 四层分配了端口角色但包树无落点）；8.6 ⑥ 方法更名 rescueTasks（v1.9 扩责后原名 rescueTimeoutTasks 名实不符）。
 > v1.11 修订：全面复审修复三处——4.4 去除 Money.java 跨包重复（domain/order/ 与 domain/shared/ 同名同类，Money 归 shared/ 共享值对象）；8.6 TaskStatusVO 补 retryAfter 字段（8.5-5 要求状态接口响应携带轮询间隔提示，原骨架只在提交响应上有）；4.1 event/ 补 OrderEventHandler（9.6 A 行 ①③ 同包，原树只有事件定义，与 4.2 同包标准对齐）。
+> v1.12 修订：新增第十章"Saga 与跨服务一致性"（问题域与弃用 2PC 理由、协同 vs 编排对照、补偿设计四要点、与 Outbox/幂等/状态机的组合、各方案落位、常见坑——偿还 4.8/8.4/第五章三处"引而不发"债务，引用处已加指针）；新增第十一章"测试策略"（测试金字塔 × 架构落点表、各方案速查、常见误区，扩展 7.2 单线结构守护）；新增第十二章"贯穿案例"（同一下单业务在 A/B/C/D 四形态的实现对照 + 速查表）；8.3 补 Java 21 虚拟线程执行器选型注（8.6 ④ 同步加注）；使用指南更新至第八~十二章。
 >
-> **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八、九章】为实战专题（异步轮询、事件驱动），涉及相应场景时按需查阅。
+> **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八~十一章】为实战专题（异步轮询、事件驱动、Saga、测试策略），涉及相应场景时按需查阅；【第十二章】为贯穿案例，用同一个"下单"业务对照 A/B/C/D 四种形态。
 
 ---
 
@@ -561,7 +562,7 @@ order-service/                               # 一个限界上下文 = 一个服
 inventory-service/                           # 同构：xxx-api/ + xxx-server/
 payment-service/
 ```
-规则：只依赖对方 api 包；Database per Service；事件 schema 版本化；配契约测试（Spring Cloud Contract / Pact）；**跨服务一致性用 Saga/补偿，不用分布式事务**。
+规则：只依赖对方 api 包；Database per Service；事件 schema 版本化；配契约测试（Spring Cloud Contract / Pact）；**跨服务一致性用 Saga/补偿，不用分布式事务**（展开见第十章）。
 
 ### 4.9 Clean/Onion（与 4.3 同族，布局对照）
 
@@ -615,7 +616,7 @@ com.example.app
 | D 全配置 | 写库仓储 + 读模型存储（可异构） | 系统枢纽：集成 + 读模型投影；Outbox + 幂等强制 | 写路径避免同步调用，能事件化就事件化 |
 | 垂直切片 | 每切片自决，禁跨切片共享 Mapper | 命令切片内发布，consumer 按 Topic/类型分发 | 切片内自包含，谨慎下沉 |
 | 模块化单体 | 模块私有，禁跨模块 JOIN | 模块间首选通信，契约即拆服务资本 | 模块间走 Facade；外部 client 归具体模块 |
-| 微服务 | 库私有（铁律） | 服务间主干，schema 版本化 + 死信队列 | api 契约包 + 熔断降级 + 契约测试；跨服务一致性走 Saga |
+| 微服务 | 库私有（铁律） | 服务间主干，schema 版本化 + 死信队列 | api 契约包 + 熔断降级 + 契约测试；跨服务一致性走 Saga（见第十章） |
 
 **一致性三件套（与架构选型正交，引入 MQ 就必须做）**：
 1. **事务性发件箱（Outbox）**：业务数据与事件同库同事务落库，保证"落库与发消息"原子化；投递侧二选一——后台轮询（简单，有 DB 压力）或 CDC 日志捕获（如 Debezium，无轮询压力、多一个组件）；
@@ -704,7 +705,7 @@ class ArchitectureTest {
 }
 ```
 
-规则多时也可改用 ArchUnit 自带的 `onionArchitecture()`（六边形/Clean）或 `layeredArchitecture()`（A/B）DSL，以声明方式一次定义全部圈层关系，比逐条手工规则更不易漏。
+规则多时也可改用 ArchUnit 自带的 `onionArchitecture()`（六边形/Clean）或 `layeredArchitecture()`（A/B）DSL，以声明方式一次定义全部圈层关系，比逐条手工规则更不易漏。完整的测试分层策略（金字塔 × 各架构落点）见第十一章。
 
 ### 7.3 常见误区清单
 
@@ -775,6 +776,8 @@ UPDATE task SET status='RUNNING' WHERE task_id=? AND status='PENDING'
 | MQ + Consumer | 分布式、量大、需削峰（推荐） | 任务表与发消息走 Outbox；消费幂等；复用 MQ 重试/死信 |
 | Scheduler 扫描 | 兜底角色 | 超时检测（RUNNING 超阈值 → 重试/TIMEOUT）、结果清理（expire_at） |
 
+> **Java 21+ 补注（虚拟线程）**：单机轻量场景可用虚拟线程替代自建平台线程池——`spring.threads.virtual.enabled=true`（Boot 3.2+）或自建 `SimpleAsyncTaskExecutor` 并 `setVirtualThreads(true)`，`@Async` 即每任务一个虚拟线程，**免去池大小与队列容量规划**；阻塞型 I/O 任务（导出、调外部接口）是最佳受益场景。但两类情况仍应有界平台线程池：CPU 密集型任务（虚拟线程不加速计算）、需要硬性并发上限做背压（此时配 Semaphore 或有界池 + 拒绝策略，语义更直白）。
+
 ### 8.4 与四类概念的对位——各架构中的位置
 
 核心洞察：**提交是写侧命令，轮询是读侧查询，执行是入站适配器触发的用例**——这个模式天然是 CQRS 的形状，也是 3.4"同一用例、多个入口"的典型实例。
@@ -788,7 +791,7 @@ UPDATE task SET status='RUNNING' WHERE task_id=? AND status='PENDING'
 | D 全配置 | 命令侧 Handler 写聚合 | 读侧查 readstore（ES/Redis 扛轮询） | 执行 Consumer 跑任务；投影 Consumer 更新读模型 | 高频轮询打在读模型，写库无压力 |
 | 垂直切片 | submittask 切片 | gettaskstatus 切片 | executetask 切片（consumer 路由进入） | 三个角色三个切片，互不调用 |
 | 模块化单体 | 各业务模块 api.Facade 暴露 submit | 同左提供 status 查询 | internal consumer 执行；跨模块靠事件 | 也可建独立 task 模块做通用任务中心 |
-| 微服务 | 任务服务统一承接或各服务自建 | 同左 | 消费者独立部署伸缩 | 跨服务长流程升级为 Saga |
+| 微服务 | 任务服务统一承接或各服务自建 | 同左 | 消费者独立部署伸缩 | 跨服务长流程升级为 Saga（见第十章） |
 
 ### 8.5 关键实现要点清单
 
@@ -868,6 +871,7 @@ public TaskStatusVO status(@PathVariable String taskId) {
 }
 
 // ===== ④ 执行器线程池（8.3：有界队列 + 拒绝策略 + 线程命名；勿用默认无界队列）=====
+// Java 21+ 轻量场景可整体替换为虚拟线程：SimpleAsyncTaskExecutor + setVirtualThreads(true)，免池化规划（见 8.3 补注）
 @Bean("taskExecutor")
 public ThreadPoolTaskExecutor taskExecutor() {
     var executor = new ThreadPoolTaskExecutor();
@@ -999,6 +1003,245 @@ public void rescueTasks() {
 | 模块化单体 4.7 | `internal/domain/{聚合}/event/` | `internal/application/event/` | —（直接发 api.event） | `api/event/` 契约 + `internal/infrastructure/messaging/` | 模块 internal 内 |
 | 微服务 4.8 | 服务内按所选 A~D | 同左 | 同左 | 跨服务一律 `xxx-api/event/schema/`（版本化） | 服务内 |
 | Clean 4.9 | `domain/entity/event/` | `usecase/event/` | `usecase/output/` | `interfaceadapters/messaging/` | interfaceadapters 下与 web 平级 |
+
+---
+
+## 第十章　实战专题：Saga 与跨服务一致性
+
+> 4.8、8.4、第五章多次引用 Saga 而未展开，本章补上。前置：已理解第五章一致性三件套（Outbox/幂等/对账）与第九章事件链——Saga 不是新机制，是它们跨上下文的组合运用。
+
+### 10.1 问题域：为什么不用分布式事务
+
+跨服务（或模块物理分库后）一个业务流程要改多处数据：下单 → 扣库存 → 扣款。2PC/XA 的代价是锁持有跨网络、协调者单点、参与者必须同构支持——互联网规模基本弃用。**Saga = 把一个大事务拆成一串本地事务，每步配一个补偿动作；任一步失败，逆序执行已成功步骤的补偿。**
+
+三个前置认知：
+
+- 牺牲的是**隔离性**：中间态对外可见（下单成功但扣款未完成）——需要"进行中"状态（PENDING / RESERVING）把中间态显式化，这正是 8.2 状态机思维的多步版；
+- **补偿是语义回滚，不是数据回滚**：补偿动作是"退款、释放库存"这类新的正向业务事实，不是 UNDO SQL；
+- 步骤分两类：**可补偿步骤**与**不可回退的枢纽步骤**（如真实扣款、发实物）——枢纽步骤之后只允许向前重试、不允许回退，流程设计应把枢纽步骤尽量后置。
+
+### 10.2 两种形态：协同 vs 编排
+
+| 维度 | 协同式（Choreography） | 编排式（Orchestration） |
+|---|---|---|
+| 控制点 | 无中心：各服务消费事件、发下一步事件 | Saga 编排器（状态机）集中发命令、收结果 |
+| 链路可见性 | 隐式，流程散落在各 Consumer 里 | 显式，流程即编排器代码，一眼看完 |
+| 耦合 | 服务间只约定事件契约 | 编排器知道所有参与者；参与者互不知晓 |
+| 适用 | 步骤少（≤3）、流程稳定 | 步骤多、有分支/超时/人工介入 |
+| 典型坑 | 事件循环（9.4）；改链路要动多个服务 | 编排器膨胀成上帝类；须持久化执行状态防崩溃失忆 |
+
+经验法则：**三步以内用协同，超过三步或带分支用编排**；编排器的进度状态机可直接复用 8.2 任务表模型（每步 = 子状态 + 条件更新推进）。
+
+### 10.3 补偿动作设计要点
+
+1. **每步先问"失败怎么退"，再写正向逻辑**——没有补偿动作的步骤不许进 Saga；
+2. 补偿同样要幂等（消息会重投），且**补偿本身可能失败** → 重试 + 死信 + 对账兜底（第五章三件套原样适用）；
+3. 正向与补偿共用同一张进度记录（saga_instance：`saga_id`、当前步、已完成步、payload 快照），崩溃后由 Scheduler 扫表续跑或续退；
+4. 补偿严格逆序；并行步骤的补偿可并行。
+
+### 10.4 与既有机制的组合（新瓶装旧酒）
+
+- 步骤间通信 = 第九章集成事件 + Outbox（9.2 环节③同事务落库）；
+- 每步消费 = 3.4-2 幂等 Consumer；
+- 编排器/协同进度表 = 8.2 任务状态机的多步扩展；
+- 兜底 = Scheduler 对账（卡步超时 → 告警或自动补偿）。
+
+### 10.5 各方案落位速查
+
+| 方案 | Saga 落点 |
+|---|---|
+| A / B | 单库事务内不需要 Saga；调外部系统时手写"动作 + 反向动作"即可，不必上框架 |
+| C | 进程内跨聚合一致性走领域事件（第九章），不算 Saga；Saga 只在调用外部系统时出现 |
+| D | 协同式的天然土壤：命令 Handler → 事件 → 下一上下文 Handler；编排器可建模为独立的 Saga 聚合 |
+| E 模块化单体 | 模块间先走 api.event 协同（Spring Modulith 事件），拆服务后平滑升级为 MQ 协同 |
+| 微服务 | 主战场；步骤多上编排（自研状态机表 / Temporal / Seata Saga 模式）；Saga 事件同样受 schema 版本化约束（4.8） |
+
+### 10.6 常见坑
+
+- 把补偿写成"删数据"（破坏审计、无法幂等）→ 补偿必须是正向业务单据（退款单、释放单）；
+- 编排器状态只存内存，崩溃后流程失忆 → 进度表持久化 + Scheduler 续跑；
+- 链路里某 Consumer 不幂等，重投导致重复扣款 → 三件套是 Saga 的前置条件，缺了先补；
+- 中间态不隔离：用户看到"已下单未扣款"的脏读 → 读模型过滤进行中状态，或业务上接受并显式展示进度。
+
+---
+
+## 第十一章　实战专题：测试策略在各架构中的落点
+
+> 7.2 的 ArchUnit 只覆盖"结构守护"一条线；本章把完整测试金字塔摊开，回答每种架构"哪层测什么、用什么工具"。核心原则：**架构越重，可纯单测的部分越多——这正是重架构的回报**。
+
+### 11.1 测试金字塔 × 架构落点
+
+| 层级 | 测什么 | 工具 | 各架构落点 |
+|---|---|---|---|
+| 领域纯单测 | 聚合行为、领域服务、状态机、管道骨架 | JUnit + AssertJ，零框架秒级 | C/D/六边形/Clean 的主战场（4.3/4.9 检验标准即"不启动 Spring"）；管道骨架（2.3）天然在此层；A/B 无领域层，此层空缺 |
+| 用例测试 | 应用服务编排：调对端口、事务边界、事件收集 | JUnit + Mockito（mock port.out） | 六边形/D 的 application 层；B 的写侧 service |
+| 适配器切片测试 | Web 层序列化/校验/错误码；持久层 SQL 与映射 | @WebMvcTest、@DataJpaTest、Testcontainers | 所有方案；出站适配器必须打真实库（Testcontainers），H2 会掩盖方言差异 |
+| 契约测试 | 跨服务 API 与事件 schema | Spring Cloud Contract / Pact | 4.8 微服务强制；E 拆服务前可用 Modulith 事件 + ArchUnit 过渡 |
+| 架构守护 | 依赖方向、包边界、命名 | ArchUnit（规则库见 7.2） | C/D/E 必配；A/B 至少保留"Controller 不直连 Mapper" |
+| 端到端 | 关键业务链路冒烟 | @SpringBootTest + Testcontainers / REST Assured | 所有方案少量（金字塔尖，个位数场景） |
+
+### 11.2 各方案测试策略速查
+
+- **A 经典分层**：Service 单测（mock Mapper）+ @WebMvcTest 校验层；贫血模型决定测试价值集中在编排与 SQL，别硬凑"领域测试"；
+- **B 轻量 CQRS**：写侧同 A；读侧直接 @DataJpaTest 验证 SQL 直出 VO，无需 mock 服务层；
+- **C/D/六边形/Clean**：领域纯单测覆盖全部业务规则（投入产出比最高的一层）；用例测试 mock 端口验证编排；适配器各自切片测试。**port.out 接口同时是测试缝**——换 fake 实现即可跑全流程集成测试，这是依赖倒置的直接红利；
+- **垂直切片**：每切片一个测试类自包含；shared/ 内核按 A 策略；
+- **E 模块化单体**：模块内按所选结构；模块间契约 = Facade 接口测试 + ArchUnit 边界规则双保险；
+- **微服务**：服务内同 C/D；服务间契约测试强制；事件 schema 用样例消息做反序列化兼容测试——旧版本消息必须能被新消费者解析（对齐 9.3 演进规则）。
+
+### 11.3 常见误区
+
+- 测试全堆在 @SpringBootTest（慢、脆、失败定位难）→ 金字塔倒过来了；
+- mock 到 Mapper 层"测 Service"——断言的是 mock 行为不是业务行为；领域逻辑应不 mock、直接 new 聚合测；
+- 为覆盖率给 Getter/Setter/MapStruct 生成物写测试；
+- 契约测试只在提供方跑——消费方必须参与验证，否则契约只是单向承诺；
+- ArchUnit 规则一次写死不复审——包结构演进后规则静默失效（7.2 的 PO 规则教训），规则要随结构评审一起更新。
+
+---
+
+## 第十二章　贯穿案例：同一个"下单"在 A/B/C/D 中的样子
+
+> 同一业务需求贯穿四种方案：**下单（校验库存 → 创建订单 → 支付）+ 查询订单详情**。对照同一逻辑在不同架构中的形态与得失，比单看包结构直观。代码均为示意骨架，省略参数校验与异常包装。
+
+### 12.1 A 经典分层：一个 Service 全包
+
+```java
+@RestController
+class OrderController {
+    @PostMapping("/orders")
+    public Result<Long> place(@RequestBody @Validated PlaceOrderRequest req) {
+        return Result.ok(orderService.place(req));
+    }
+    @GetMapping("/orders/{id}")
+    public Result<OrderVO> detail(@PathVariable Long id) { return Result.ok(orderService.detail(id)); }
+}
+
+@Service
+class OrderServiceImpl implements OrderService {
+    @Transactional
+    public Long place(PlaceOrderRequest req) {
+        // 规则、流程、外部调用全在一处：随业务增长线性恶化（上帝类的起点）
+        if (stockMapper.deduct(req.skuId(), req.count()) == 0) {      // 条件更新防超卖
+            throw new BizException("库存不足");
+        }
+        OrderDO order = OrderDO.of(req);
+        orderMapper.insert(order);
+        paymentClient.deduct(order.getId(), order.getAmount());       // ⚠ 事务内同步调外部：超时与回滚都棘手
+        return order.getId();
+    }
+    public OrderVO detail(Long id) { return orderMapper.selectDetail(id); }   // 写读同链
+}
+```
+
+特征：写读同链、规则内联在 Service；改一个字段要穿 controller/service/mapper 三层。够用，但要看住 Service 膨胀。
+
+### 12.2 B 轻量 CQRS：写读两条路径
+
+```java
+// 写侧：规则唯一所在
+@Service
+class OrderCommandService {
+    @Transactional
+    public Long place(PlaceOrderCmd cmd) {
+        if (!stockRepository.deduct(cmd.skuId(), cmd.count())) throw new BizException("库存不足");
+        Order order = Order.create(cmd);                              // 半充血：创建守卫在模型
+        orderRepository.save(order);
+        publisher.publishEvent(new OrderPlacedEvent(order.getId()));  // 后续动作（通知/积分）进程内解耦
+        return order.getId();
+    }
+}
+// 读侧：不碰写模型，SQL 直出 VO
+@Service
+class OrderQueryService {
+    public OrderDetailVO detail(OrderDetailQuery q) { return orderQueryMapper.selectDetail(q.orderId()); }
+}
+```
+
+特征：读链永远不被写模型绑架，列表/报表随便联表；代价是同一个"订单"有 Entity 与 VO 两套表达。
+
+### 12.3 C 六边形 + DDD：规则归聚合，技术归适配器
+
+```java
+// domain：规则唯一安放地，零框架，可纯单测
+class Order {                                                         // 聚合根
+    private OrderStatus status = OrderStatus.CREATED;
+    static Order place(CustomerId customer, List<OrderLine> lines, StockChecker stockChecker) {
+        if (lines.isEmpty()) throw new DomainException("订单行不能为空");
+        lines.forEach(l -> stockChecker.requireEnough(l.skuId(), l.count()));  // 跨聚合校验经领域服务接口
+        return new Order(customer, lines);
+    }
+    void markPaid() {                                                 // 状态机守卫内聚
+        if (status != OrderStatus.CREATED) throw new DomainException("非待支付状态");
+        status = OrderStatus.PAID;
+    }
+}
+// application：编排，无业务规则
+@Service
+class PlaceOrderService implements PlaceOrderUseCase {
+    @Transactional
+    public OrderId place(PlaceOrderCmd cmd) {
+        Order order = Order.place(cmd.customerId(), cmd.toLines(), stockChecker);
+        orderRepositoryPort.save(order);
+        eventPublisherPort.publish(order.pullEvents());               // 聚合收集事件，应用层统一发布（9.2②）
+        return order.getId();
+    }
+}
+// adapter.in.web：只做翻译
+@RestController
+class OrderController {
+    @PostMapping("/orders")
+    public OrderPlacedResponse place(@RequestBody @Validated PlaceOrderRequest req) {
+        OrderId id = placeOrderUseCase.place(assembler.toCmd(req));   // DTO → Cmd 在适配器内转换
+        return new OrderPlacedResponse(id.value());
+    }
+}
+```
+
+特征：业务规则可脱离 Spring 纯单测；代价是接口与转换代码量翻倍，CRUD 占比高时不划算。
+
+### 12.4 D 全配置：写链事件化，读链走投影
+
+```java
+// 写链：命令 Handler → 聚合 → 集成事件 → Outbox（同事务）
+@Component
+class PlaceOrderHandler {
+    @Transactional
+    public OrderId handle(PlaceOrderCmd cmd) {
+        Order order = Order.place(cmd.customerId(), cmd.toLines(), stockChecker);
+        orderRepositoryPort.save(order);
+        outboxPort.append(OrderPlacedIntegrationEvent.of(order));     // 落库即事实，投递由 Relay 保证
+        return order.getId();
+    }
+}
+// 投影链：Consumer 更新读模型（最终一致）
+@Component
+class OrderProjectionConsumer {
+    @KafkaListener(topics = "order.order-placed.v1")
+    public void on(OrderPlacedMsg msg) {                              // 幂等：processed 表去重（3.4-2）
+        if (processedDao.exists(msg.eventId())) return;
+        readModelUpdater.apply(msg);
+        processedDao.insert(msg.eventId());
+    }
+}
+// 读链：查询不碰写库
+@Service
+class OrderQueryService {
+    public OrderDetailVO detail(String orderId) { return readStore.get("order:" + orderId); }
+}
+```
+
+特征：写库只扛命令，读模型扛全部查询与轮询（8.4）；代价是投影滞后（下完单立刻查可能查不到 → 提交响应带写后读令牌或前台乐观轮询）、投影重建与 schema 演进需预案（2.1 已列）。
+
+### 12.5 四形态对照速查
+
+| 维度 | A | B | C | D |
+|---|---|---|---|---|
+| 下单规则的安放 | Service 方法内 | 写侧 Service + 半充血模型 | 聚合行为 | 聚合行为（同 C） |
+| 查询实现 | 同一 Service/Mapper | 读侧 SQL 直出 VO | 查询用例 + 仓储 | 读模型投影 |
+| 一致性 | 单事务 | 单事务（事件进程内） | 聚合事务 + 事件最终一致 | 全链路最终一致 |
+| 规则可纯单测 | ✗ | 部分 | ✓ | ✓ |
+| 代码量（相对） | 1× | 1.5× | 2.5× | 4× |
+| 升级信号 | — | 报表/复杂查询出现 | 规则互踩、Service 破千行 | 读压垮写库、下游解耦诉求 |
 
 ---
 
