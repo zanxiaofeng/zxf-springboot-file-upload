@@ -1,6 +1,6 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.9　|　日期：2026-09-23
+> 版本：v1.10　|　日期：2026-09-23
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
@@ -11,6 +11,7 @@
 > v1.7 修订：投影类 Consumer 口径补齐（3.2 B 行入口列、第五章 B 行，对齐 4.2/9.6 既有例外）；7.4 评分建议补第 1 题分水岭、修正第 2 题指向（对齐 1.1 的 Q2→B 口径）；9.6 铁律①与六边形行对齐（4.3/9.6 六边形领域事件改随聚合分包，与 4.5 同标准）；8.6 提交代码补幂等命中 200 分支；4.5 投影链跨层调用补务实偏离声明；8.3 默认执行器措辞修正（问题在队列无界而非"禁用默认"）；7.2 模块隔离规则补参数化说明。
 > v1.8 修订：第四章包结构示例补齐全部空包内容（4.1 dto/config/common、4.2 event/vo/common、4.3 web dto/assembler 与 client dto、4.4 interfaces dto/command/inventory/shared/outbox/client dto/common、4.5 task/domain/persistence/messaging/client、4.6 shared common、4.7 internal domain/infrastructure、4.9 frameworks config 均给出代表类）；8.6 最小代码骨架由三段扩为完整链路六段（状态枚举与 VO、TaskMapper 条件更新、提交 Service 幂等三态、提交/轮询接口、线程池装配、@Async 独立执行器、兜底 Scheduler），并新增"事务提交前触发 @Async 读不到任务行"的时机坑提示（afterCommit 注册）。
 > v1.9 修订：第五次全面复审修复五处——8.6 markFailed 重试耗尽终态口径对齐 8.2 状态机（超限停 FAILED，TIMEOUT 改为可选的区分性终态说明）；8.6 ⑥ 补 PENDING 重新触发闭环（findPending + execute，修复"markFailed 回 PENDING 后无人触发"的链路缺口）；4.5 去除 OutboxRelayJob 双包重复（infrastructure/messaging/ 改放 OutboxMessage 表实体，轮询触发归 interfaces/task，对齐 9.6 ⑥ 与 3.4）；8.6 补 progress 回写来源（updateProgress）；8.6 ① 补 PG 事务 aborted 限定注（DuplicateKeyException 同事务续查仅 MySQL 语义）。
+> v1.10 修订：再次全面复审修复三处——4.5 messaging/ 补 MqProducer 投递发送方（v1.9 去重后该包无发送角色，且 9.6 ⑥ 要求发布器在 infrastructure/messaging/）；4.4 domain/shared/ 补 EventPublisher 发布端口（9.6 ④ 给 DDD 四层分配了端口角色但包树无落点）；8.6 ⑥ 方法更名 rescueTasks（v1.9 扩责后原名 rescueTimeoutTasks 名实不符）。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八、九章】为实战专题（异步轮询、事件驱动），涉及相应场景时按需查阅。
 
@@ -412,7 +413,8 @@ com.example.app
 │   │   ├── Inventory.java
 │   │   └── event/StockDeductedEvent.java
 │   └── shared/                            # 共享值对象、通用枚举
-│       └── Money.java
+│       ├── Money.java
+│       └── EventPublisher.java            # 发布端口：接口在 domain，实现在 infrastructure/messaging（9.6 ④）
 ├── infrastructure/
 │   ├── persistence/
 │   │   ├── OrderRepositoryImpl.java       # implements domain 的仓储接口
@@ -475,6 +477,7 @@ com.example.app
 │   │                                      #  的跨越是有意为之，不进经典四层依赖规则）
 │   ├── messaging/                         # Outbox → MQ 投递
 │   │   ├── OutboxMessage.java             #   发件箱表实体（字段见 9.3）；轮询触发的 Job 在 interfaces/task
+│   │   ├── MqProducer.java                #   投递发送方（被 Relay Job 调用）
 │   │   └── event/OrderPlacedMsg.java      #   集成事件载荷（见 9.6）
 │   └── client/PaymentACL.java             # 防腐层（写路径慎用同步调用）
 └── bootstrap/                             # 装配入口
@@ -891,7 +894,7 @@ class ExportTaskExecutor {
 
 // ===== ⑥ 兜底 Scheduler（8.3）：RUNNING 超时回收 + 重启遗留 PENDING 重新触发 =====
 @Scheduled(fixedDelay = 60_000)
-public void rescueTimeoutTasks() {
+public void rescueTasks() {
     for (TaskDO t : taskMapper.findTimeoutRunning(LocalDateTime.now().minusMinutes(10))) {
         taskMapper.markFailed(t.getTaskId(), "执行超时");    // 超时按一次失败计入重试，重试耗尽停 FAILED
         // （8.2 的 TIMEOUT 是可选的区分性终态；简化实现可并入 FAILED）
