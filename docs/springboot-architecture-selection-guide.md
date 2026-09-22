@@ -1,11 +1,12 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.4　|　日期：2026-09-22
+> 版本：v1.5　|　日期：2026-09-22
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
 > v1.3 修订：新增第八章"异步 + 轮询 API"专题；修复包结构复审问题（4.6 共享仓储违反"禁跨切片共享"规则、4.7 包名含连字符不合法、JPA 组件命名误导、A 方案 VO 口径、4.2 补消费入口等）。
 > v1.4 修订：修复决策流程 Q3=否 死路与兜底可达性、B 方案写链口径（Entity 兼 PO）、2.1 补微服务成九种、ArchUnit PO 规则对六边形布局失效、幂等命中状态码统一、@Async 自调用陷阱提示；补 4.2 client/task 包、4.5 bootstrap 内容；新增 2.3 管道（Pipe-Filter）维度与 4.9 Clean/Onion 包结构。复审补遗：4.1 补 listener/ 入口、3.2 垂直切片定时任务表述对齐 4.6、第五章补 Clean/Onion 行、2.3 措辞与 Verdict 结论对齐、4.9 ArchUnit 包名映射补全、8.6 改用 Mapper 词汇。
+> v1.5 修订：第三章概念体系补齐（① 实时通道/其他协议入口、② Repository/Port 接口与 Factory、③ Cache/对象存储出站依赖、④ VO 三途定义、"四类之外：横切与装配"定位说明、3.4 标题泛化）；新增第九章"事件驱动设计"专题（双形态对照、六环节生命周期与 AFTER_COMMIT 相位、事件本体设计与 Outbox 表字段、常见坑、各方案落位速查）。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航。
 
@@ -126,6 +127,7 @@ com.example.app
 | Web Controller | HTTP 请求 → 参数校验 → 调应用服务/用例 → DTO 返回 | 保持薄，不写业务 |
 | Message Consumer | MQ 消息 → 翻译成命令 → 调应用服务/用例 | 必须幂等；与 Controller 平级 |
 | Scheduler | 定时触发（@Scheduled / XXL-Job / Quartz）→ 调用例 | 只触发不处理；常用于 Outbox 轮询、超时关单、对账补偿 |
+| 实时通道 / 其他协议 | SSE / WebSocket 推送连接（见 8.1）、gRPC / GraphQL 端点、应用启动钩子 | 同 Controller：把协议报文/触发翻译成用例调用，协议差异不出入口层 |
 
 **② 核心业务（Domain & Use Case）——业务规则唯一的安放地**
 
@@ -135,6 +137,8 @@ com.example.app
 | Aggregate / Entity / ValueObject | 充血模型，业务规则与状态守护（聚合根是唯一入口） |
 | Domain Service | 跨聚合的领域逻辑 |
 | Domain Event | 已发生的业务事实（OrderPlacedEvent），聚合内产生 |
+| Repository / Port 接口 | 领域声明的持久化与外部依赖契约（"我要存什么/调什么"），实现在出口适配器——依赖倒置的支点 |
+| Factory | 复杂创建逻辑的归属（简单创建用构造函数/静态工厂即可，勿为Factory而工厂） |
 
 **③ 出口适配器（Outbound / 被驱动侧）——领域对外部世界只有接口声明**
 
@@ -143,6 +147,7 @@ com.example.app
 | Persistence | 仓储/持久化实现（JPA、MyBatis），领域只定义接口（端口） |
 | Client | 外部 HTTP/RPC 调用，兼**防腐层**：外部 DTO 就地翻译成内部模型 |
 | Message Publisher | 领域事件 → 集成事件 → MQ；配事务性发件箱保证一致性 |
+| Cache / Object Storage | Redis 等缓存、OSS 等对象存储——同为被驱动的出站依赖，照端口+适配器处理（注意：读缓存 ≠ 读模型，后者是 CQRS 投影） |
 
 **④ 数据结构——跨层流动的载体**
 
@@ -153,10 +158,12 @@ com.example.app
 | Query | 读意图封装（OrderDetailQuery） | 入口 → 查询服务 |
 | Entity / Model | 领域对象（含行为） | 只在核心层 |
 | PO / DO | 持久化对象（表映射） | 只在持久化适配器；不出基础设施层 |
-| VO | 读侧视图对象（SQL 直出） | 查询链路终点 |
+| VO | 读侧视图对象（来源三途：查询 SQL 直出 / 读模型投影产出 / Clean Presenter 产出） | 查询链路终点 |
 | Event | 事件载荷（领域事件/集成事件） | 核心层产生，MQ 传播 |
 
 **转换铁律**：跨层才转换，层内不转；统一用 MapStruct；DTO 不出接口层，PO 不出基础设施层，Entity 不出核心层。
+
+> **四类之外：横切与装配**。config/（SecurityConfig、Bean 装配）、common/（异常体系、Result、枚举工具）、bootstrap/（启动装配）不承载业务概念，不进这个坐标系，但每种方案的包结构里都有它们的固定位置（见第四章）。
 
 ### 3.2 概念 × 架构 总矩阵
 
@@ -202,9 +209,9 @@ D 全配置（三条链）
   HTTP → 切片Controller → Handler → (共享Entity | 私有SQL) → Response/VO
 ```
 
-### 3.4 三种入口适配器的共性规则
+### 3.4 入口适配器的共性规则
 
-1. **同一用例，多个入口**：一个下单用例应能同时被 REST、MQ 消息、定时重试触发——入口只做协议翻译（HTTP 报文 / 消息体 / 定时参数 → Command），业务只在用例与领域里。检验标准：新增一种触发源时，核心代码零改动。
+1. **同一用例，多个入口**：一个下单用例应能同时被 REST、MQ 消息、定时重试触发——入口只做协议翻译（HTTP 报文 / 消息体 / 定时参数 / 订阅帧 → Command），业务只在用例与领域里。检验标准：新增一种触发源时，核心代码零改动。
 2. **Consumer 必须幂等，且分两类**：业务命令类 Consumer 翻译后只进写侧用例；读模型投影类 Consumer 只更新读模型、不回写领域。两者都用业务唯一键/去重表保证可重入。
 3. **Scheduler 只触发不处理**：典型职责是 Outbox 轮询投递、超时关单扫描、对账补偿——它扫出"该做的事"，交给用例去做，自己不写业务。
 4. 在六边形/DDD/Clean 中，三者包位置平级：adapter 下的 `in.web` / `in.messaging` / `in.scheduler`（或 interfaces 下的 `rest` / `consumer` / `task`，Clean 则在 interfaceadapters 下并列）。
@@ -578,7 +585,7 @@ com.example.app
 | Entity / 聚合根名 | 领域层 | 充血，不出核心层（A/B 方案例外：见 4.1 注、4.2 model 兼任 PO） |
 | PO / DO | 基础设施层 | 不出持久化适配器 |
 | VO | 查询链路 | SQL 直出 |
-| Event | 领域层/MQ | 领域事件 vs 集成事件分开命名 |
+| Event | 领域层/MQ | 领域事件 vs 集成事件分开命名（约定见 9.3） |
 
 跨层转换统一 MapStruct；**跨层才转换，层内不转换**。
 
@@ -763,6 +770,68 @@ public void execute(String taskId) {
     }
 }
 ```
+
+---
+
+## 第九章　实战专题：事件驱动设计
+
+> 前文各章零散用到事件（3.1 的 Domain Event、第五章的 Outbox、8.4 的投影 Consumer）；本章把它们串成一条完整链路：**一个事件从聚合出生，到进程内分发、跨上下文传播、消费端落地的一生**。
+
+### 9.1 双形态对照：领域事件 vs 集成事件
+
+| 维度 | 领域事件 Domain Event | 集成事件 Integration Event |
+|---|---|---|
+| 语义 | 上下文内部已发生的业务事实 | 对外发布的事实，是跨上下文/跨服务**契约** |
+| 产生 | 聚合行为内产生、聚合收集 | 由领域事件翻译而来（publisher 适配器 / Outbox 写入时） |
+| 一致性 | 与业务同事务（落库即事实） | 最终一致（Outbox 投递） |
+| 传输 | 进程内（ApplicationEvent），不出上下文 | MQ / 模块间 api.event / 服务间版本化事件 |
+| 消费方 | 本上下文 EventHandler（后续编排）、投影 | 他上下文/他服务的 Consumer |
+| 演进 | 随代码自由重构 | 契约演进：只加可选字段，破坏性变更版本化（V1/V2 并存期） |
+
+一句话：**领域事件是"日记"，集成事件是"公告"**——日记随便改，公告要存档编号。
+
+### 9.2 生命周期链（六个环节）
+
+```
+① 聚合产生:   order.place() 内部 registerEvent(new OrderPlacedEvent(...))
+② 收集带出:   应用层保存聚合时取出事件（聚合自己不发——聚合不依赖基础设施）
+③ 同事务落库:  业务数据 + Outbox 记录同一事务写入（复用第五章三件套）
+④ 分发:
+     进程内:   ApplicationEventPublisher → @EventListener / @TransactionalEventListener
+     跨上下文: Outbox 轮询/CDC → 翻译成集成事件 → MQ
+⑤ 消费:      幂等（业务唯一键/去重表）；命令类进写侧用例、投影类只更新读模型（3.4-2）
+⑥ 兜底:      重试 + 死信 + 对账（Scheduler 的典型职责）
+```
+
+**@TransactionalEventListener 的两个相位**（进程内分发最常用的坑点）：
+
+- 默认 `AFTER_COMMIT`：事务提交后才执行——**监听器里的 DB 操作不在原事务里，失败不会回滚业务**，只适合发通知、更新 Outbox 状态类操作；
+- 需要"与业务同事务"的后续处理（如同库扣库存）：用 `BEFORE_COMMIT`，或根本不走事件、直接同步调用领域服务。
+
+### 9.3 事件本体设计
+
+- **胖事件 vs 瘦事件**：胖事件携带全量快照（消费方不求人，但生产者改一个字段就伤一片消费者）；瘦事件只带标识与最小事实（`OrderPlaced(id, amount)`），消费方按需回查。缺省建议**瘦事件**，热点查询才允许胖；
+- **命名**：过去式陈述事实（`OrderPlaced`，不是 `PlaceOrder`——那是 Command）；集成事件带上下文前缀（`order.order-placed.v1`），Topic 与事件类型一一对应；
+- **Outbox 表关键字段**：`event_id`、`aggregate_type / aggregate_id`、`event_type`、`payload`（JSON）、`status`（PENDING/SENT/DEAD）、`retry_count`、`next_retry_at`、`created_at`——投递侧轮询或 CDC（见第五章）；
+- **schema 演进**：只加可选字段，不删不改语义；消费端容忍未知字段（不得反序列化失败）；破坏性变更发 V2 并存，双写观察期后下线 V1。
+
+### 9.4 常见坑清单
+
+- 聚合里直接调 publisher 发 MQ（聚合依赖了基础设施，且事务外发送必丢）→ 聚合只 `registerEvent`，发布交给应用层/Outbox；
+- `AFTER_COMMIT` 监听器里写业务库，失败不回滚 → 见 9.2；
+- 监听器异常被吞（log 完就完）→ 事件即丢失；必须 重试 → 死信 → 对账/人工兜底；
+- 事件循环：A 发事件 → B 消费后又触发 A → 死循环；跨上下文事件触发新命令时，幂等键 + traceId 环路检测；
+- 全系统一种"Event"类，领域/集成双形态混用 → 公告上桌了日记的内部字段，一改即事故。
+
+### 9.5 各方案落位速查
+
+| 方案 | 事件起步姿势 | 演进 |
+|---|---|---|
+| A | Spring `ApplicationEventPublisher` + `@TransactionalEventListener`，零中间件够用 | 引入 MQ 时再上 Outbox |
+| B | 写侧发布；读侧只消费投影类事件 | — |
+| C | `EventPublisherPort` 出站端口 + 适配器实现（4.3）；DDD 四层 `application/event/` 订阅（4.4） | — |
+| D | 领域事件 → 集成事件强制走 Outbox；投影链更新读模型（8.4） | schema 版本化强制 |
+| E / 微服务 | 模块/服务间只走 api.event 集成事件（Spring Modulith 事件或 MQ）；领域事件不出模块 | 拆分时 api.event 直接映射 MQ Topic |
 
 ---
 
