@@ -5,7 +5,7 @@
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
 > v1.3 修订：新增第八章"异步 + 轮询 API"专题；修复包结构复审问题（4.6 共享仓储违反"禁跨切片共享"规则、4.7 包名含连字符不合法、JPA 组件命名误导、A 方案 VO 口径、4.2 补消费入口等）。
-> v1.4 修订：修复决策流程 Q3=否 死路与兜底可达性、B 方案写链口径（Entity 兼 PO）、2.1 补微服务成九种、ArchUnit PO 规则对六边形布局失效、幂等命中状态码统一、@Async 自调用陷阱提示；补 4.2 client/task 包、4.5 bootstrap 内容；新增 2.3 管道（Pipe-Filter）维度与 4.9 Clean/Onion 包结构。
+> v1.4 修订：修复决策流程 Q3=否 死路与兜底可达性、B 方案写链口径（Entity 兼 PO）、2.1 补微服务成九种、ArchUnit PO 规则对六边形布局失效、幂等命中状态码统一、@Async 自调用陷阱提示；补 4.2 client/task 包、4.5 bootstrap 内容；新增 2.3 管道（Pipe-Filter）维度与 4.9 Clean/Onion 包结构。复审补遗：4.1 补 listener/ 入口、3.2 垂直切片定时任务表述对齐 4.6、第五章补 Clean/Onion 行、2.3 措辞与 Verdict 结论对齐、4.9 ArchUnit 包名映射补全、8.6 改用 Mapper 词汇。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航。
 
@@ -88,9 +88,9 @@
 
 ### 2.3 补充维度：管道（Pipe-Filter）——当核心域是"一条流程"
 
-§2.2 的维度回答"代码怎么组织"，唯独没回答"**核心流程怎么执行**"。若业务核心是一条多阶段处理链——文件安全扫描、内容审核、风控规则链、数据加工/ETL——"厚 Service 里一坨顺序 if-else"不是唯一解，管道模式更贴形：
+§2.2 的其余维度回答"代码怎么组织、边界怎么划"；管道这一维回答的是"**核心流程怎么执行**"。若业务核心是一条多阶段处理链——文件安全扫描、内容审核、风控规则链、数据加工/ETL——"厚 Service 里一坨顺序 if-else"不是唯一解，管道模式更贴形：
 
-- **骨架**：`Stage` 接口（`execute(Context) → Verdict`）+ `Pipeline`（按序执行）+ `Verdict`（sealed 结论，如 Passed / Infected / Rejected）/ `Context`（阶段间传参与上游产物）；**首个非 Passed 结论即短路**；
+- **骨架**：`Stage` 接口（`execute(Context) → Verdict`）+ `Pipeline`（按序执行）+ `Verdict`（sealed 结论，如 Passed / Infected / Rejected / Flagged）/ `Context`（阶段间传参与上游产物）；**首个非 Passed 结论即短路**；
 - **顺序即领域规则**：阶段顺序（先类型校验后病毒扫描、先便宜后昂贵）是业务规则不是技术细节——应显式装配在一个配置类里，新增阶段 = 新实现 + 装配加一行（OCP）；
 - **与六边形天然组合**：管道骨架（接口/结论/上下文/执行器）放 domain，零框架依赖可纯单测；依赖引擎与配置的 Stage 实现放 application；引擎客户端是普通次适配器。包结构示例：
 
@@ -168,7 +168,7 @@ com.example.app
 | **DDD 四层** | interfaces 下 rest / consumer / task 三者并列 | application（Cmd/Query、事务）+ domain（聚合、领域服务、领域事件、仓储接口） | infrastructure 下 persistence（仓储实现）/ client（ACL 防腐）/ messaging（publisher + outbox） | DTO → Cmd → Aggregate ↔ PO；事件双形态（领域 → 集成）；查询出 VO |
 | **D 全配置** | interfaces 下 rest（命令/查询分离）、consumer（含读模型投影）、task（对账补偿） | application.command（Handler）+ application.query + domain（聚合、事件、端口） | 写库 persistence + 读模型 readstore（ES/Redis）+ publisher（Outbox 强制）+ client（写路径慎用同步） | 读写两套：Cmd → Aggregate → DomainEvent → IntegrationEvent → 读模型 VO |
 | **Clean/Onion** | 适配器圈：web / consumer / scheduler | 用例圈（接口+端口）+ 实体圈 | 适配器圈实现 Gateway，框架驱动最外圈 | 同六边形（包结构见 4.9） |
-| **垂直切片** | 每切片自带 Controller；consumer 按 Topic/消息类型分发到切片 Handler；一个定时任务 = 一个切片 | 切片内 Handler 即轻量用例；共享实体下沉 shared/domain | 每切片自决 persistence；client 切片内自包含、谨慎下沉 | 每切片私有 Request/Response；共享 Entity；查询切片直出 VO |
+| **垂直切片** | 每切片自带 Controller；consumer 按 Topic/消息类型分发到切片 Handler；定时任务独立 scheduler 入口，只触发切片 Handler | 切片内 Handler 即轻量用例；共享实体下沉 shared/domain | 每切片自决 persistence；client 切片内自包含、谨慎下沉 | 每切片私有 Request/Response；共享 Entity；查询切片直出 VO |
 | **模块化单体** | 模块 internal 内的 controller / consumer / scheduler；consumer 订阅他模块 api.event | 模块 internal 自选（可分层可 DDD）；对外只暴露 api.Facade | persistence 模块私有（禁跨模块 JOIN）；模块间调用 = api.Facade（进程内 client）；publisher 发布 api 包定义的集成事件 | api.dto 与 api.event 是跨模块契约；internal 内自选 |
 | **微服务** | 各服务自己的 controller / consumer / scheduler | 服务内部任选 A~D 结构 | persistence 库私有（铁律）；client = xxx-api 契约包 + 熔断降级；messaging 为服务间主干、schema 版本化 | api 包承载跨服务 DTO 与事件 schema；内部自选 |
 
@@ -207,7 +207,7 @@ D 全配置（三条链）
 1. **同一用例，多个入口**：一个下单用例应能同时被 REST、MQ 消息、定时重试触发——入口只做协议翻译（HTTP 报文 / 消息体 / 定时参数 → Command），业务只在用例与领域里。检验标准：新增一种触发源时，核心代码零改动。
 2. **Consumer 必须幂等，且分两类**：业务命令类 Consumer 翻译后只进写侧用例；读模型投影类 Consumer 只更新读模型、不回写领域。两者都用业务唯一键/去重表保证可重入。
 3. **Scheduler 只触发不处理**：典型职责是 Outbox 轮询投递、超时关单扫描、对账补偿——它扫出"该做的事"，交给用例去做，自己不写业务。
-4. 在六边形/DDD/Clean 中，三者包位置平级：adapter 下的 `in.web` / `in.messaging` / `in.scheduler`（或 interfaces 下的 `rest` / `consumer` / `task`）。
+4. 在六边形/DDD/Clean 中，三者包位置平级：adapter 下的 `in.web` / `in.messaging` / `in.scheduler`（或 interfaces 下的 `rest` / `consumer` / `task`，Clean 则在 interfaceadapters 下并列）。
 
 ---
 
@@ -250,8 +250,10 @@ com.example.app
 │   ├── result/Result.java             # 统一响应包装
 │   ├── exception/BizException.java    # 业务异常 + ErrorCode 枚举
 │   └── enums/  constant/  util/
-└── task/                              # @Scheduled / XXL-Job，直调 Service
-    └── OrderTimeoutJob.java
+├── task/                              # @Scheduled / XXL-Job，直调 Service
+│   └── OrderTimeoutJob.java
+└── listener/                          # MQ 监听直调 Service（与 Controller/task 同为触发入口，须幂等）
+    └── PaymentCallbackListener.java
 ```
 > **注（Entity 语义例外）**：统一约定中 Entity=领域对象，但 A 方案无领域层，`entity/` 实指**持久化对象**（MyBatis/JPA 实体惯例），不承载领域行为。演进到 C/D 时，请让领域对象独占 Entity/Model 语义，持久化对象改称 PO。
 
@@ -526,7 +528,7 @@ com.example.app
     ├── AppApplication.java
     └── config/
 ```
-规则：依赖只朝内（entities ← usecases ← interfaceadapters ← frameworks）；领域层零框架依赖可纯单测；4.3 的 ArchUnit 守护规则同样适用（把 `adapter/bootstrap` 换成 `interfaceadapters/frameworks`）。
+规则：依赖只朝内（entities ← usecases ← interfaceadapters ← frameworks）；领域层零框架依赖可纯单测；4.3 的 ArchUnit 守护规则同样适用（包名映射：`adapter`→`interfaceadapters`、`bootstrap`→`frameworks`、`application`→`usecase`）。
 
 ---
 
@@ -539,6 +541,7 @@ com.example.app
 | A 经典分层 | 最底层 DAO，Service 直接用 | 无正式位置，散在 Service；注意先发消息后提交事务的不一致坑 | 无正式位置；至少收敛 client/ 包管超时重试 |
 | B 轻量 CQRS | 写仓储 + 读查询 Mapper 分裂 | 消费路由到写侧命令 | 只允许写侧调用 |
 | 六边形 | 出站端口 + 持久化适配器；PO 与领域分离 | 发布 = 出站端口；消费 = 入站适配器 | 出站端口 + 防腐适配器，外部 DTO 就地翻译 |
+| Clean/Onion | 同六边形（布局见 4.9） | 同六边形 | 同六边形 |
 | DDD 四层 | 领域仓储：接口在 domain、每聚合一个、实现在 infrastructure | 领域事件（内，同事务）/ 集成事件（外，MQ）+ Outbox | 防腐层 ACL，属上下文映射 |
 | D 全配置 | 写库仓储 + 读模型存储（可异构） | 系统枢纽：集成 + 读模型投影；Outbox + 幂等强制 | 写路径避免同步调用，能事件化就事件化 |
 | 垂直切片 | 每切片自决，禁跨切片共享 Mapper | 命令切片内发布，consumer 按 Topic/类型分发 | 切片内自包含，谨慎下沉 |
@@ -751,12 +754,12 @@ public TaskStatusVO status(@PathVariable String taskId) {
 //    须经代理调用（拆独立 TaskExecutor Bean / 注入自身代理 / 由提交链路之外触发）
 @Async("taskExecutor")
 public void execute(String taskId) {
-    if (!taskRepository.tryMarkRunning(taskId)) return;   // 条件更新抢执行权
+    if (!taskMapper.tryMarkRunning(taskId)) return;   // 条件更新抢执行权
     try {
         String resultUrl = doExport(taskId);
-        taskRepository.markSuccess(taskId, resultUrl);
+        taskMapper.markSuccess(taskId, resultUrl);
     } catch (Exception e) {
-        taskRepository.markFailed(taskId, e.getMessage()); // 重试判断（retry_count，见 8.2）略
+        taskMapper.markFailed(taskId, e.getMessage()); // 重试判断（retry_count，见 8.2）略
     }
 }
 ```
