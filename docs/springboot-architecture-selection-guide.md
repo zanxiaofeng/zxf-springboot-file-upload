@@ -1,10 +1,11 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.3　|　日期：2026-09-22
+> 版本：v1.4　|　日期：2026-09-22
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
 > v1.3 修订：新增第八章"异步 + 轮询 API"专题；修复包结构复审问题（4.6 共享仓储违反"禁跨切片共享"规则、4.7 包名含连字符不合法、JPA 组件命名误导、A 方案 VO 口径、4.2 补消费入口等）。
+> v1.4 修订：修复决策流程 Q3=否 死路与兜底可达性、B 方案写链口径（Entity 兼 PO）、2.1 补微服务成九种、ArchUnit PO 规则对六边形布局失效、幂等命中状态码统一、@Async 自调用陷阱提示；补 4.2 client/task 包、4.5 bootstrap 内容；新增 2.3 管道（Pipe-Filter）维度与 4.9 Clean/Onion 包结构。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航。
 
@@ -14,17 +15,17 @@
 
 ### 1.1 快速决策流程
 
-按顺序回答，命中即停；Q5 是对已选方案的**叠加判断**：
+按顺序回答，命中即停；Q5 不选方案，是最后的**叠加判断**（在已选方案或兜底 B 之上）：
 
 | 步骤 | 问题 | 判断与去向 |
 |---|---|---|
 | Q1 | 业务是否以 CRUD 为主（管理后台、内部系统、MVP）？ | 是 → **方案 A 经典分层** |
 | Q2 | 业务中等，但列表/报表/复杂查询很多？ | 是 → **方案 B 分层 + 轻量 CQRS** |
-| Q3 | 复杂核心业务域（交易、订单、计费、风控）？ | 是 → 继续 Q4；否 → 转 Q5 |
+| Q3 | 复杂核心业务域（交易、订单、计费、风控）？ | 是 → 继续 Q4；否 → 落 **方案 B 兜底**（随后仍过 Q5） |
 | Q4 | 读远多于写、查询极复杂、或下游系统多需解耦？ | 是 → **方案 D 全配置（DDD + 六边形 + CQRS + 事件驱动）**；否 → **方案 C（DDD + 六边形）** |
-| Q5 | 业务边界不稳定、未来有拆分微服务预期？ | 是 → 在已选方案外套 **E 模块化单体**的模块外壳（E 也可独立作为整体形态，模块内部按需选 A~D） |
+| Q5 | 业务边界不稳定、未来有拆分微服务预期？ | 是 → 在已选方案（含兜底 B）外套 **E 模块化单体**的模块外壳（E 也可独立作为整体形态，模块内部按需选 A~D）；否 → 维持已选方案 |
 
-兜底规则：Q1~Q4 均答"否"（既不简单也不复杂的中等系统）→ 默认 **B**，务实起步、保留演进空间。
+兜底规则：流程未命中任何方案（Q1/Q2/Q3 均答"否"的"既不简单也不复杂"中等系统）→ 默认 **B**，务实起步、保留演进空间。
 
 三个降级/约束条件（优先级高于上述流程）：
 
@@ -59,7 +60,7 @@
 
 ## 第二章　架构模式全景
 
-### 2.1 八种模式一句话对比
+### 2.1 九种模式一句话对比
 
 | 模式 | 一句话 | 核心优点 | 核心代价 | 适用 |
 |---|---|---|---|---|
@@ -71,6 +72,7 @@
 | Clean/Onion | 同心圆，依赖只朝内 | 与六边形同族 | 同六边形 | 同六边形 |
 | 垂直切片 | 按用例组织而非按层组织 | 切片自包含、改动范围小 | 共享抽取需克制 | 用例差异大、快速迭代 |
 | 模块化单体 | 单体内按限界上下文划模块 | 演进到微服务的最佳前站 | 需纪律与工具守护边界 | 边界未定的中期项目 |
+| 微服务 | 一个限界上下文 = 一个独立部署的服务 | 独立演进、独立伸缩、技术异构 | 分布式复杂性：最终一致、集成测试、运维成本 | 边界已稳定、规模与团队撑得起 |
 
 ### 2.2 模式之间是正交可组合的，不是互斥的
 
@@ -79,9 +81,37 @@
 - **DDD** 管"业务模型怎么建"（聚合、事件、限界上下文）；
 - **CQRS** 管"读写怎么分"（两条模型/路径）；
 - **垂直切片**管"按什么维度组织代码"（用例 vs 层）；
+- **管道**管"核心流程怎么执行"（阶段化、顺序即规则、可短路，见 2.3）；
 - **模块化单体 / 微服务**管"系统边界怎么划"（模块 vs 服务）。
 
 一个系统完全可以各取所长：例如"模块化单体 + 订单模块内部用 DDD 四层 + 查询侧轻 CQRS + 用户模块内部经典三层"。
+
+### 2.3 补充维度：管道（Pipe-Filter）——当核心域是"一条流程"
+
+§2.2 的维度回答"代码怎么组织"，唯独没回答"**核心流程怎么执行**"。若业务核心是一条多阶段处理链——文件安全扫描、内容审核、风控规则链、数据加工/ETL——"厚 Service 里一坨顺序 if-else"不是唯一解，管道模式更贴形：
+
+- **骨架**：`Stage` 接口（`execute(Context) → Verdict`）+ `Pipeline`（按序执行）+ `Verdict`（sealed 结论，如 Passed / Infected / Rejected）/ `Context`（阶段间传参与上游产物）；**首个非 Passed 结论即短路**；
+- **顺序即领域规则**：阶段顺序（先类型校验后病毒扫描、先便宜后昂贵）是业务规则不是技术细节——应显式装配在一个配置类里，新增阶段 = 新实现 + 装配加一行（OCP）；
+- **与六边形天然组合**：管道骨架（接口/结论/上下文/执行器）放 domain，零框架依赖可纯单测；依赖引擎与配置的 Stage 实现放 application；引擎客户端是普通次适配器。包结构示例：
+
+```
+com.example.app
+├── domain/scan/                        # 管道骨架：零框架依赖，可纯单测
+│   ├── ScanStage.java                  #   阶段接口：execute(ScanContext) → ScanVerdict
+│   ├── ScanVerdict.java                #   sealed 结论：Passed / Infected / Rejected / Flagged
+│   ├── ScanContext.java                #   阶段间上下文（携带上游产物）
+│   └── ScanPipeline.java               #   按序执行 + 首个非 Passed 短路
+├── application/scan/
+│   ├── ScanPipelineConfig.java         #   阶段顺序显式装配（顺序即领域规则）
+│   └── stage/                          #   Stage 实现 ×N（可依赖引擎客户端/配置）
+│       ├── FileTypeScanStage.java
+│       └── VirusScanStage.java
+└── infrastructure/scan/                # 引擎客户端（次适配器）
+    └── clamav/ClamAvClient.java
+```
+
+- **入域判定**：阶段的构成、顺序与短路由业务说了算 → 管道骨架入 domain；只是技术性加工步骤（无业务规则）→ 留在 application 编排即可，不必入 domain。
+- 实例参考：文件上传安全扫描管道（类型校验 → 病毒扫描 → YARA 规则 → 文档威胁，四阶段短路）即"六边形骨架 + 管道核心 + 受理边 CQRS"的组合落地。
 
 ---
 
@@ -133,11 +163,11 @@
 | 架构 | 入口适配器 | 核心业务 | 出口适配器 | 数据结构 |
 |---|---|---|---|---|
 | **A 经典分层** | controller/；task/、listener/ 直调 Service | service/（贫血过程式）；无聚合、无事件概念 | mapper/（DAO）；client/ 建议收敛；MQ 发送散在 service | DTO ↔ PO（entity 兼任业务对象，例外见 4.1 注）；无 Cmd/Query 之分，response 可用 VO 或直接复用 DO |
-| **B 轻量 CQRS** | 命令/查询 Controller 分离；消费端与定时任务只进写侧 | command 侧 service（规则唯一所在）；读侧无核心 | 写：repository；读：query.mapper 直出 SQL；client 仅写侧 | 写链 DTO → Cmd → Entity → PO；读链 Query → VO |
+| **B 轻量 CQRS** | 命令/查询 Controller 分离；消费端与定时任务只进写侧 | command 侧 service（规则唯一所在）；读侧无核心 | 写：repository；读：query.mapper 直出 SQL；client 仅写侧 | 写链 DTO → Cmd → Entity（兼 PO）；读链 Query → VO |
 | **六边形** | adapter 的 in.web / in.messaging / in.scheduler 三者并列，只做"翻译 + 调 port.in" | port.in 用例接口 + application 实现 + domain 模型与服务 | port.out 三端口 + adapter.out 三适配器（persistence / messaging / client） | DTO → Cmd → Model ↔ PO（转换在适配器内） |
 | **DDD 四层** | interfaces 下 rest / consumer / task 三者并列 | application（Cmd/Query、事务）+ domain（聚合、领域服务、领域事件、仓储接口） | infrastructure 下 persistence（仓储实现）/ client（ACL 防腐）/ messaging（publisher + outbox） | DTO → Cmd → Aggregate ↔ PO；事件双形态（领域 → 集成）；查询出 VO |
 | **D 全配置** | interfaces 下 rest（命令/查询分离）、consumer（含读模型投影）、task（对账补偿） | application.command（Handler）+ application.query + domain（聚合、事件、端口） | 写库 persistence + 读模型 readstore（ES/Redis）+ publisher（Outbox 强制）+ client（写路径慎用同步） | 读写两套：Cmd → Aggregate → DomainEvent → IntegrationEvent → 读模型 VO |
-| **Clean/Onion** | 适配器圈：web / consumer / scheduler | 用例圈（接口+端口）+ 实体圈 | 适配器圈实现 Gateway，框架驱动最外圈 | 同六边形 |
+| **Clean/Onion** | 适配器圈：web / consumer / scheduler | 用例圈（接口+端口）+ 实体圈 | 适配器圈实现 Gateway，框架驱动最外圈 | 同六边形（包结构见 4.9） |
 | **垂直切片** | 每切片自带 Controller；consumer 按 Topic/消息类型分发到切片 Handler；一个定时任务 = 一个切片 | 切片内 Handler 即轻量用例；共享实体下沉 shared/domain | 每切片自决 persistence；client 切片内自包含、谨慎下沉 | 每切片私有 Request/Response；共享 Entity；查询切片直出 VO |
 | **模块化单体** | 模块 internal 内的 controller / consumer / scheduler；consumer 订阅他模块 api.event | 模块 internal 自选（可分层可 DDD）；对外只暴露 api.Facade | persistence 模块私有（禁跨模块 JOIN）；模块间调用 = api.Facade（进程内 client）；publisher 发布 api 包定义的集成事件 | api.dto 与 api.event 是跨模块契约；internal 内自选 |
 | **微服务** | 各服务自己的 controller / consumer / scheduler | 服务内部任选 A~D 结构 | persistence 库私有（铁律）；client = xxx-api 契约包 + 熔断降级；messaging 为服务间主干、schema 版本化 | api 包承载跨服务 DTO 与事件 schema；内部自选 |
@@ -149,7 +179,7 @@ A 经典分层
   写/读: HTTP → Controller(DTO) → Service(逻辑) ↔ Entity(即PO) → Mapper → DB
 
 B 轻量 CQRS
-  写: HTTP → CmdController → CmdService(Cmd) ↔ Entity/PO → Repository → DB
+  写: HTTP → CmdController → CmdService(Cmd) ↔ Entity(兼 PO) → Repository → DB
   读: HTTP → QueryController → QueryService(Query) → QueryMapper(SQL) → VO
 
 六边形 / Clean
@@ -184,7 +214,7 @@ D 全配置（三条链）
 ## 第四章　包结构设计汇总
 
 > 统一约定：根包 `com.example.{project}`；后缀约定 DTO（传输）、VO（视图）、Entity/Model（领域）、PO/DO（持久化）、Cmd/Query（命令/查询）。
-> 节-方案映射：4.1=A、4.2=B、4.3+4.4=C、4.5=D、4.6=垂直切片（可叠加于任意方案）、4.7=E、4.8=微服务。
+> 节-方案映射：4.1=A、4.2=B、4.3+4.4=C、4.5=D、4.6=垂直切片（可叠加于任意方案）、4.7=E、4.8=微服务、4.9=Clean/Onion（与 4.3 同族）。
 
 ### 4.1 A 经典分层
 
@@ -240,11 +270,16 @@ com.example.app
 │   ├── cmd/                           # 命令对象
 │   │   ├── CreateOrderCmd.java
 │   │   └── CancelOrderCmd.java
-│   ├── model/                         # 写模型实体（可贫血/半充血）
+│   ├── model/                         # 写模型实体（可贫血/半充血，JPA 下兼任 PO）
 │   │   └── Order.java
 │   ├── repository/                    # 写侧仓储（面向实体）
 │   │   └── OrderRepository.java
-│   └── consumer/                      # MQ 消费/定时入口挂写侧（只进 command）
+│   ├── client/                        # 外部调用只挂写侧（读侧禁用）
+│   │   └── PaymentClient.java
+│   ├── consumer/                      # MQ 消费入口：消息→Cmd→写侧 service，幂等
+│   │   └── PaymentCallbackConsumer.java
+│   └── task/                          # 定时入口：只触发，调写侧 service
+│       └── OrderTimeoutJob.java
 ├── query/                             # 读侧：不建领域对象，怎么快怎么来
 │   ├── controller/
 │   │   └── OrderQueryController.java      # GET 列表/详情/导出
@@ -384,10 +419,14 @@ com.example.app
 │   ├── readstore/                         # 读模型：ES / Redis / 读库
 │   │   ├── OrderReadModelDAO.java
 │   │   └── OrderReadModelUpdater.java     # 投影更新器（被投影 Consumer 调用）
-│   │                                      # 投影链允许 interfaces 直达 readstore，不经过 application/domain
+│   │                                      # 投影链：投影 Consumer 直调 Updater，不经 application；HTTP 读链仍走 application.query
 │   ├── messaging/                         # Outbox → MQ 投递
 │   └── client/                            # 防腐层（写路径慎用同步调用）
-└── bootstrap/
+└── bootstrap/                             # 装配入口
+    ├── AppApplication.java
+    └── config/
+        ├── OutboxRelayConfig.java         # Outbox 轮询投递装配
+        └── ReadModelConfig.java           # readstore 连接与投影注册
 ```
 规则：读链永远不碰 domain 包；聚合内收集领域事件，仓储保存后统一投递；读写物理分离则接受最终一致。
 
@@ -412,7 +451,7 @@ com.example.app
 ├── consumer/
 │   └── OrderMessageRouter.java            # 按 Topic/消息类型分发到对应 Handler
 ├── scheduler/
-│   └── CloseExpiredOrdersJob.java         # 定时入口视为切片；Job 只触发，业务在 Handler
+│   └── CloseExpiredOrdersJob.java         # 独立入口包，按切片原则组织：Job 只触发，业务在切片 Handler
 └── shared/                                # 仅放真正跨切片复用的内核
     ├── domain/Order.java                  # 共享实体（持久化各切片自决，不下沉仓储）
     └── common/                            # Result / 异常 / 枚举
@@ -459,6 +498,36 @@ payment-service/
 ```
 规则：只依赖对方 api 包；Database per Service；事件 schema 版本化；配契约测试（Spring Cloud Contract / Pact）；**跨服务一致性用 Saga/补偿，不用分布式事务**。
 
+### 4.9 Clean/Onion（与 4.3 同族，布局对照）
+
+> Clean Architecture 是六边形的同心圆表述，依赖规则与数据流转完全同构（§3.2/3.3 中两者并列即此意）；差别主要在**圈层命名**与 Presenter 约定。与 4.3 二选一，勿混用。
+
+```
+com.example.app
+├── domain/                                # 最内圈：实体 + 出站端口（Onion 惯例称 Gateway）
+│   ├── entity/
+│   │   ├── Order.java                     # 充血实体
+│   │   └── OrderNo.java                   # 值对象
+│   └── gateway/
+│       └── OrderRepositoryGateway.java    # 语义同 port.out：接口在圈内，实现在圈外
+├── usecase/                               # 用例圈：入站端口 + 输出端口 + 用例实现
+│   ├── input/
+│   │   └── PlaceOrderInputPort.java       # 语义同 port.in，Controller 只依赖它
+│   ├── output/
+│   │   └── NotificationOutputPort.java
+│   └── PlaceOrderInteractor.java          # 用例实现（Onion 惯例称 Interactor）
+├── interfaceadapters/                     # 接口适配圈：入口协议 + 出站实现
+│   ├── web/
+│   │   ├── OrderController.java
+│   │   └── presenter/OrderPresenter.java  # 用例输出 → 视图模型，Controller 不见领域对象
+│   └── gateway/
+│       └── OrderRepositoryGatewayImpl.java
+└── frameworks/                            # 最外圈：框架驱动与装配
+    ├── AppApplication.java
+    └── config/
+```
+规则：依赖只朝内（entities ← usecases ← interfaceadapters ← frameworks）；领域层零框架依赖可纯单测；4.3 的 ArchUnit 守护规则同样适用（把 `adapter/bootstrap` 换成 `interfaceadapters/frameworks`）。
+
 ---
 
 ## 第五章　出站组件定位（persistence / messaging / client）
@@ -477,7 +546,7 @@ payment-service/
 | 微服务 | 库私有（铁律） | 服务间主干，schema 版本化 + 死信队列 | api 契约包 + 熔断降级 + 契约测试；跨服务一致性走 Saga |
 
 **一致性三件套（与架构选型正交，引入 MQ 就必须做）**：
-1. **事务性发件箱（Outbox）**：业务数据与事件同库同事务落库，后台轮询投递，保证"落库与发消息"原子化；
+1. **事务性发件箱（Outbox）**：业务数据与事件同库同事务落库，保证"落库与发消息"原子化；投递侧二选一——后台轮询（简单，有 DB 压力）或 CDC 日志捕获（如 Debezium，无轮询压力、多一个组件）；
 2. **消费幂等**：业务唯一键 / 去重表，消费可重入；
 3. **最终一致性兜底**：对账任务（Scheduler 的典型职责）+ 补偿流程。
 
@@ -489,9 +558,9 @@ payment-service/
 |---|---|---|---|---|
 | A 经典分层 | Controller→Service→Mapper | Spring Boot + MyBatis-Plus + Validation + MapStruct | CRUD、内部系统、MVP | 查询变复杂 → B |
 | B 分层 + 轻 CQRS | 写 Service + 读 QueryService 双路径 | 同上，读侧可 JdbcTemplate | 查询多的 B 端业务系统 | 核心域变复杂 → C |
-| C DDD + 六边形 | interfaces/application/domain/infrastructure + port/adapter | Spring Boot + JPA/MyBatis + MapStruct + ArchUnit | 核心复杂域 | 并发与解耦诉求 → D |
+| C DDD + 六边形 | 双骨架任选：4.3 端口式（domain/application/adapter/bootstrap）或 4.4 四层式（interfaces/application/domain/infrastructure），勿混用 | Spring Boot + JPA/MyBatis + MapStruct + ArchUnit | 核心复杂域 | 并发与解耦诉求 → D |
 | D 全配置 | C + CQRS 物理分离 + 事件驱动 | 追加 MQ、ES/Redis、Outbox | 高并发核心系统 | — |
-| E 模块化单体 | 模块 api/internal 隔离，事件通信 | Spring Boot + ApplicationEvent + ArchUnit（事件后平移 MQ） | 边界未定、有拆分预期 | 热点模块抽微服务 |
+| E 模块化单体 | 模块 api/internal 隔离，事件通信 | Spring Modulith（模块边界验证 + 事件发布订阅开箱即用），或 Spring Boot + ApplicationEvent + ArchUnit（事件后平移 MQ） | 边界未定、有拆分预期 | 热点模块抽微服务 |
 
 ---
 
@@ -503,7 +572,7 @@ payment-service/
 |---|---|---|
 | DTO / Request / Response | 接口层 | 不出接口层 |
 | Cmd / Query | 应用层入口 | 写/读意图 |
-| Entity / 聚合根名 | 领域层 | 充血，不出核心层（A 方案例外见 4.1 注） |
+| Entity / 聚合根名 | 领域层 | 充血，不出核心层（A/B 方案例外：见 4.1 注、4.2 model 兼任 PO） |
 | PO / DO | 基础设施层 | 不出持久化适配器 |
 | VO | 查询链路 | SQL 直出 |
 | Event | 领域层/MQ | 领域事件 vs 集成事件分开命名 |
@@ -530,11 +599,24 @@ class ArchitectureTest {
             .should().dependOnClassesThat()
             .resideInAnyPackage("..adapter..", "..bootstrap..");
 
-    // 【适用 C/D】PO 不得出持久化实现包
+    // 【适用 六边形】application 只依赖 port.out 接口，不得直接依赖出站适配器实现
+    @ArchTest
+    static final ArchRule 六边形_应用不碰适配器 =
+        noClasses().that().resideInAPackage("..application..")
+            .should().dependOnClassesThat()
+            .resideInAnyPackage("..adapter.out..", "..adapter.in..");
+
+    // 【适用 4.4/4.5 布局（DDD 四层/D）】PO 不得出持久化实现包
     @ArchTest
     static final ArchRule po_不出基础设施 =
         noClasses().that().resideOutsideOfPackage("..infrastructure.persistence..")
             .should().dependOnClassesThat().resideInAPackage("..po..");
+
+    // 【适用 4.3 六边形布局】PO 在 adapter.out.persistence.po，须按该布局另写一条，否则规则静默失效
+    @ArchTest
+    static final ArchRule po_不出六边形适配器 =
+        noClasses().that().resideOutsideOfPackage("..adapter.out.persistence..")
+            .should().dependOnClassesThat().resideInAPackage("..adapter.out.persistence.po..");
 
     // 【适用 E】模块 internal 包禁止跨模块访问
     @ArchTest
@@ -549,6 +631,8 @@ class ArchitectureTest {
             .should().accessClassesThat().resideInAPackage("..mapper..");
 }
 ```
+
+规则多时也可改用 ArchUnit 自带的 `onionArchitecture()`（六边形/Clean）或 `layeredArchitecture()`（A/B）DSL，以声明方式一次定义全部圈层关系，比逐条手工规则更不易漏。
 
 ### 7.3 常见误区清单
 
@@ -636,7 +720,7 @@ UPDATE task SET status='RUNNING' WHERE task_id=? AND status='PENDING'
 
 ### 8.5 关键实现要点清单
 
-1. **提交幂等**：`biz_no` 唯一索引；重复提交直接返回已有 taskId（200 而非新建）；
+1. **提交幂等**：`biz_no` 唯一索引；首次提交返回 202，重复提交直接返回已有 taskId（200 而非新建）——两种状态码有意区分；
 2. **一致性**：任务表与业务数据同事务落库；MQ 触发走 Outbox（复用第五章三件套）；
 3. **执行幂等**：执行器可重入，状态推进用条件更新抢执行权；
 4. **超时与重试**：Scheduler 兜底扫描，最大重试次数 + 退避；
@@ -647,7 +731,7 @@ UPDATE task SET status='RUNNING' WHERE task_id=? AND status='PENDING'
 ### 8.6 最小代码骨架（方案 A 语境）
 
 ```java
-// ① 提交：202 + taskId（幂等）
+// ① 提交：首次 202 + Location + taskId；幂等命中（bizNo 已存在）→ 200 + 已有 taskId，不新建
 @PostMapping("/api/export-tasks")
 public ResponseEntity<TaskSubmitVO> submit(@RequestBody @Validated ExportTaskRequest req) {
     String taskId = exportTaskService.submit(req);        // bizNo 命中则返回已有任务
@@ -663,6 +747,8 @@ public TaskStatusVO status(@PathVariable String taskId) {
 }
 
 // ③ 执行：@Async 单机版（分布式换 MQ Consumer，业务逻辑同一处）
+// ⚠ @Async 自调用失效：在 submit() 同类里直接调 this.execute(taskId) 不走代理、异步静默失效；
+//    须经代理调用（拆独立 TaskExecutor Bean / 注入自身代理 / 由提交链路之外触发）
 @Async("taskExecutor")
 public void execute(String taskId) {
     if (!taskRepository.tryMarkRunning(taskId)) return;   // 条件更新抢执行权
@@ -670,7 +756,7 @@ public void execute(String taskId) {
         String resultUrl = doExport(taskId);
         taskRepository.markSuccess(taskId, resultUrl);
     } catch (Exception e) {
-        taskRepository.markFailed(taskId, e.getMessage());
+        taskRepository.markFailed(taskId, e.getMessage()); // 重试判断（retry_count，见 8.2）略
     }
 }
 ```
