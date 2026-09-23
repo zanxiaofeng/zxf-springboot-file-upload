@@ -1,6 +1,6 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.14　|　日期：2026-09-23
+> 版本：v1.15　|　日期：2026-09-23
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
@@ -16,6 +16,7 @@
 > v1.12 修订：新增第十章"Saga 与跨服务一致性"（问题域与弃用 2PC 理由、协同 vs 编排对照、补偿设计四要点、与 Outbox/幂等/状态机的组合、各方案落位、常见坑——偿还 4.8/8.4/第五章三处"引而不发"债务，引用处已加指针）；新增第十一章"测试策略"（测试金字塔 × 架构落点表、各方案速查、常见误区，扩展 7.2 单线结构守护）；新增第十二章"贯穿案例"（同一下单业务在 A/B/C/D 四形态的实现对照 + 速查表）；8.3 补 Java 21 虚拟线程执行器选型注（8.6 ④ 同步加注）；使用指南更新至第八~十二章。
 > v1.13 修订：全面复审新增章节修复四处——10.3 要点 1 排除枢纽步骤（"无补偿不许进 Saga"只约束可补偿步骤，与 10.1 枢纽步骤概念对齐）；11.1 领域纯单测行 B 方案口径修正（半充血模型守卫可纯单测，对齐 12.5"部分"，11.2 B 行同步）；12.3 补 C 方案查询用例读链（章首需求含查详情，A/B/D 均有而 C 缺，且 12.5 已声称"查询用例 + 仓储"）；12.4 写链改为领域事件出聚合（outboxPort.appendAll(pullEvents)），领域→集成翻译归发布适配器，对齐 9.6 ⑤⑥（原代码把翻译漏进 application）。
 > v1.14 修订：全面复审修复两处——12.3 查询用例 VO 转换归位（原 QueryOrderService 在 application 层直接构造 OrderDetailVO，违反 3.2"转换在适配器内"与 4.3 assembler 落点；改用例返回领域对象、Controller 补 GET 端点展示 assembler.toVO，读链转换纪律闭环）；8.6 ① 补 BIZ_TYPE 常量定义（骨架唯一未定义符号）。
+> v1.15 修订：全面复审仅余一处措辞精度修正——9.6 角色④ DDD 四层落点"仓储接口同级"与 4.4 实际落位（domain/shared/）对齐为"domain 内（仓储接口同级或 shared/）"；其余各角度复查零新发现，文档进入稳定状态。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八~十一章】为实战专题（异步轮询、事件驱动、Saga、测试策略），涉及相应场景时按需查阅；【第十二章】为贯穿案例，用同一个"下单"业务对照 A/B/C/D 四种形态。
 
@@ -1001,7 +1002,7 @@ public void rescueTasks() {
 | A 4.1 | `event/` 根包（按业务分包后随业务包） | `event/` | —（直用 publisher） | — | `listener/` |
 | B 4.2 | `command/event/`（定义与 Handler 同包） | `command/event/` | — | 写侧发布（只 command） | 命令类 `command/consumer/`；投影类 `query/consumer/`（引入读缓存才有） |
 | 六边形 4.3 | `domain/model/{聚合}/event/` | `application/event/` | `domain/port/out/EventPublisherPort` | `adapter/out/messaging/`（载荷+翻译+发布） | `adapter/in/messaging/` |
-| DDD 四层 4.4 | `domain/{聚合}/event/` | `application/event/` | 仓储接口同级 | `infrastructure/messaging/`（含载荷） | `interfaces/consumer/` |
+| DDD 四层 4.4 | `domain/{聚合}/event/` | `application/event/` | domain 内（仓储接口同级或 `shared/`，4.4 示例取后者） | `infrastructure/messaging/`（含载荷） | `interfaces/consumer/` |
 | D 4.5 | `domain/model/{聚合}/event/` | `application/`（D 的事件主走 MQ 投影，进程内订阅少） | `domain/port/out/EventBusPort` | `infrastructure/messaging/` | `interfaces/consumer/`（命令/投影两类） |
 | 垂直切片 4.6 | **产生事件的切片内**（切片对外契约，消费切片 import 合法；事件基类下沉 `shared/`） | 消费切片内 | — | 切片自包含或 `shared/messaging/` | `consumer/` Router |
 | 模块化单体 4.7 | `internal/domain/{聚合}/event/` | `internal/application/event/` | —（直接发 api.event） | `api/event/` 契约 + `internal/infrastructure/messaging/` | 模块 internal 内 |
