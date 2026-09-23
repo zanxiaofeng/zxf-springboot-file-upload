@@ -1,6 +1,6 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.13　|　日期：2026-09-23
+> 版本：v1.14　|　日期：2026-09-23
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
@@ -15,6 +15,7 @@
 > v1.11 修订：全面复审修复三处——4.4 去除 Money.java 跨包重复（domain/order/ 与 domain/shared/ 同名同类，Money 归 shared/ 共享值对象）；8.6 TaskStatusVO 补 retryAfter 字段（8.5-5 要求状态接口响应携带轮询间隔提示，原骨架只在提交响应上有）；4.1 event/ 补 OrderEventHandler（9.6 A 行 ①③ 同包，原树只有事件定义，与 4.2 同包标准对齐）。
 > v1.12 修订：新增第十章"Saga 与跨服务一致性"（问题域与弃用 2PC 理由、协同 vs 编排对照、补偿设计四要点、与 Outbox/幂等/状态机的组合、各方案落位、常见坑——偿还 4.8/8.4/第五章三处"引而不发"债务，引用处已加指针）；新增第十一章"测试策略"（测试金字塔 × 架构落点表、各方案速查、常见误区，扩展 7.2 单线结构守护）；新增第十二章"贯穿案例"（同一下单业务在 A/B/C/D 四形态的实现对照 + 速查表）；8.3 补 Java 21 虚拟线程执行器选型注（8.6 ④ 同步加注）；使用指南更新至第八~十二章。
 > v1.13 修订：全面复审新增章节修复四处——10.3 要点 1 排除枢纽步骤（"无补偿不许进 Saga"只约束可补偿步骤，与 10.1 枢纽步骤概念对齐）；11.1 领域纯单测行 B 方案口径修正（半充血模型守卫可纯单测，对齐 12.5"部分"，11.2 B 行同步）；12.3 补 C 方案查询用例读链（章首需求含查详情，A/B/D 均有而 C 缺，且 12.5 已声称"查询用例 + 仓储"）；12.4 写链改为领域事件出聚合（outboxPort.appendAll(pullEvents)），领域→集成翻译归发布适配器，对齐 9.6 ⑤⑥（原代码把翻译漏进 application）。
+> v1.14 修订：全面复审修复两处——12.3 查询用例 VO 转换归位（原 QueryOrderService 在 application 层直接构造 OrderDetailVO，违反 3.2"转换在适配器内"与 4.3 assembler 落点；改用例返回领域对象、Controller 补 GET 端点展示 assembler.toVO，读链转换纪律闭环）；8.6 ① 补 BIZ_TYPE 常量定义（骨架唯一未定义符号）。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八~十一章】为实战专题（异步轮询、事件驱动、Saga、测试策略），涉及相应场景时按需查阅；【第十二章】为贯穿案例，用同一个"下单"业务对照 A/B/C/D 四种形态。
 
@@ -832,6 +833,8 @@ interface TaskMapper {
 }
 
 // ===== ① 提交（Service）：幂等 = 先查 + 唯一索引兜底 =====
+private static final String BIZ_TYPE = "REPORT_EXPORT";    // 任务类型（8.2 任务表的 biz_type）
+
 @Transactional
 public SubmitResult submit(ExportTaskRequest req) {
     TaskDO existing = taskMapper.findByBizNo(BIZ_TYPE, req.bizNo());
@@ -1195,13 +1198,17 @@ class OrderController {
         OrderId id = placeOrderUseCase.place(assembler.toCmd(req));   // DTO → Cmd 在适配器内转换
         return new OrderPlacedResponse(id.value());
     }
+    @GetMapping("/orders/{id}")
+    public OrderDetailVO detail(@PathVariable String id) {
+        Order order = queryOrderUseCase.detail(new OrderDetailQuery(id));
+        return assembler.toVO(order);                                 // Model → VO 同样在适配器内（3.2 六边形行）
+    }
 }
-// 查询用例：读链同样经 port.in/port.out，不直连仓储实现（4.3 QueryOrderUseCase）
+// 查询用例：读链同样经 port.in/port.out（4.3 QueryOrderUseCase）；用例返回领域对象，VO 转换归适配器
 @Service
 class QueryOrderService implements QueryOrderUseCase {
-    public OrderDetailVO detail(OrderDetailQuery q) {
-        Order order = orderRepositoryPort.load(q.orderId());          // 聚合出核心层前转为 VO
-        return OrderDetailVO.of(order);
+    public Order detail(OrderDetailQuery q) {
+        return orderRepositoryPort.load(q.orderId());
     }
 }
 ```
