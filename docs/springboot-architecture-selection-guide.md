@@ -1,6 +1,6 @@
 # Spring Boot Web API 架构选型参考手册
 
-> 版本：v1.12　|　日期：2026-09-23
+> 版本：v1.13　|　日期：2026-09-23
 >
 > v1.1 修订：修复决策流程 Q5 可达性、六边形依赖方向表述、Consumer 口径、Entity 语义注释、ArchUnit 规则适用范围等。
 > v1.2 修订：第四章包结构示例由骨架级扩充为类级别（含具体类名与职责注释）。
@@ -14,6 +14,7 @@
 > v1.10 修订：再次全面复审修复三处——4.5 messaging/ 补 MqProducer 投递发送方（v1.9 去重后该包无发送角色，且 9.6 ⑥ 要求发布器在 infrastructure/messaging/）；4.4 domain/shared/ 补 EventPublisher 发布端口（9.6 ④ 给 DDD 四层分配了端口角色但包树无落点）；8.6 ⑥ 方法更名 rescueTasks（v1.9 扩责后原名 rescueTimeoutTasks 名实不符）。
 > v1.11 修订：全面复审修复三处——4.4 去除 Money.java 跨包重复（domain/order/ 与 domain/shared/ 同名同类，Money 归 shared/ 共享值对象）；8.6 TaskStatusVO 补 retryAfter 字段（8.5-5 要求状态接口响应携带轮询间隔提示，原骨架只在提交响应上有）；4.1 event/ 补 OrderEventHandler（9.6 A 行 ①③ 同包，原树只有事件定义，与 4.2 同包标准对齐）。
 > v1.12 修订：新增第十章"Saga 与跨服务一致性"（问题域与弃用 2PC 理由、协同 vs 编排对照、补偿设计四要点、与 Outbox/幂等/状态机的组合、各方案落位、常见坑——偿还 4.8/8.4/第五章三处"引而不发"债务，引用处已加指针）；新增第十一章"测试策略"（测试金字塔 × 架构落点表、各方案速查、常见误区，扩展 7.2 单线结构守护）；新增第十二章"贯穿案例"（同一下单业务在 A/B/C/D 四形态的实现对照 + 速查表）；8.3 补 Java 21 虚拟线程执行器选型注（8.6 ④ 同步加注）；使用指南更新至第八~十二章。
+> v1.13 修订：全面复审新增章节修复四处——10.3 要点 1 排除枢纽步骤（"无补偿不许进 Saga"只约束可补偿步骤，与 10.1 枢纽步骤概念对齐）；11.1 领域纯单测行 B 方案口径修正（半充血模型守卫可纯单测，对齐 12.5"部分"，11.2 B 行同步）；12.3 补 C 方案查询用例读链（章首需求含查详情，A/B/D 均有而 C 缺，且 12.5 已声称"查询用例 + 仓储"）；12.4 写链改为领域事件出聚合（outboxPort.appendAll(pullEvents)），领域→集成翻译归发布适配器，对齐 9.6 ⑤⑥（原代码把翻译漏进 application）。
 >
 > **如何使用本文档**：先在【第一章】用决策流程和决策表锁定候选方案；再到【第三章】理解四类核心概念（入口适配器 / 核心业务 / 出口适配器 / 数据结构）在该架构中的位置与数据流转；然后从【第四章】复制包结构骨架开工；最后按【第七章】的命名约定、ArchUnit 守护规则和检查清单落地护航；【第八~十一章】为实战专题（异步轮询、事件驱动、Saga、测试策略），涉及相应场景时按需查阅；【第十二章】为贯穿案例，用同一个"下单"业务对照 A/B/C/D 四种形态。
 
@@ -1034,7 +1035,7 @@ public void rescueTasks() {
 
 ### 10.3 补偿动作设计要点
 
-1. **每步先问"失败怎么退"，再写正向逻辑**——没有补偿动作的步骤不许进 Saga；
+1. **每个可补偿步骤先问"失败怎么退"，再写正向逻辑**——可补偿步骤没有补偿动作不许进 Saga（不可回退的枢纽步骤除外：它无需补偿，但其后的步骤只许向前重试，见 10.1）；
 2. 补偿同样要幂等（消息会重投），且**补偿本身可能失败** → 重试 + 死信 + 对账兜底（第五章三件套原样适用）；
 3. 正向与补偿共用同一张进度记录（saga_instance：`saga_id`、当前步、已完成步、payload 快照），崩溃后由 Scheduler 扫表续跑或续退；
 4. 补偿严格逆序；并行步骤的补偿可并行。
@@ -1073,7 +1074,7 @@ public void rescueTasks() {
 
 | 层级 | 测什么 | 工具 | 各架构落点 |
 |---|---|---|---|
-| 领域纯单测 | 聚合行为、领域服务、状态机、管道骨架 | JUnit + AssertJ，零框架秒级 | C/D/六边形/Clean 的主战场（4.3/4.9 检验标准即"不启动 Spring"）；管道骨架（2.3）天然在此层；A/B 无领域层，此层空缺 |
+| 领域纯单测 | 聚合行为、领域服务、状态机、管道骨架 | JUnit + AssertJ，零框架秒级 | C/D/六边形/Clean 的主战场（4.3/4.9 检验标准即"不启动 Spring"）；管道骨架（2.3）天然在此层；A 无领域层此层空缺，B 仅写侧半充血模型的守卫可纯单测（12.5 的"部分"） |
 | 用例测试 | 应用服务编排：调对端口、事务边界、事件收集 | JUnit + Mockito（mock port.out） | 六边形/D 的 application 层；B 的写侧 service |
 | 适配器切片测试 | Web 层序列化/校验/错误码；持久层 SQL 与映射 | @WebMvcTest、@DataJpaTest、Testcontainers | 所有方案；出站适配器必须打真实库（Testcontainers），H2 会掩盖方言差异 |
 | 契约测试 | 跨服务 API 与事件 schema | Spring Cloud Contract / Pact | 4.8 微服务强制；E 拆服务前可用 Modulith 事件 + ArchUnit 过渡 |
@@ -1083,7 +1084,7 @@ public void rescueTasks() {
 ### 11.2 各方案测试策略速查
 
 - **A 经典分层**：Service 单测（mock Mapper）+ @WebMvcTest 校验层；贫血模型决定测试价值集中在编排与 SQL，别硬凑"领域测试"；
-- **B 轻量 CQRS**：写侧同 A；读侧直接 @DataJpaTest 验证 SQL 直出 VO，无需 mock 服务层；
+- **B 轻量 CQRS**：写侧——半充血模型的守卫直接 new 实体纯单测，Service 编排同 A；读侧直接 @DataJpaTest 验证 SQL 直出 VO，无需 mock 服务层；
 - **C/D/六边形/Clean**：领域纯单测覆盖全部业务规则（投入产出比最高的一层）；用例测试 mock 端口验证编排；适配器各自切片测试。**port.out 接口同时是测试缝**——换 fake 实现即可跑全流程集成测试，这是依赖倒置的直接红利；
 - **垂直切片**：每切片一个测试类自包含；shared/ 内核按 A 策略；
 - **E 模块化单体**：模块内按所选结构；模块间契约 = Facade 接口测试 + ArchUnit 边界规则双保险；
@@ -1195,6 +1196,14 @@ class OrderController {
         return new OrderPlacedResponse(id.value());
     }
 }
+// 查询用例：读链同样经 port.in/port.out，不直连仓储实现（4.3 QueryOrderUseCase）
+@Service
+class QueryOrderService implements QueryOrderUseCase {
+    public OrderDetailVO detail(OrderDetailQuery q) {
+        Order order = orderRepositoryPort.load(q.orderId());          // 聚合出核心层前转为 VO
+        return OrderDetailVO.of(order);
+    }
+}
 ```
 
 特征：业务规则可脱离 Spring 纯单测；代价是接口与转换代码量翻倍，CRUD 占比高时不划算。
@@ -1202,14 +1211,14 @@ class OrderController {
 ### 12.4 D 全配置：写链事件化，读链走投影
 
 ```java
-// 写链：命令 Handler → 聚合 → 集成事件 → Outbox（同事务）
+// 写链：命令 Handler → 聚合 → 领域事件 → Outbox（同事务；领域→集成翻译在发布适配器，9.6⑥）
 @Component
 class PlaceOrderHandler {
     @Transactional
     public OrderId handle(PlaceOrderCmd cmd) {
         Order order = Order.place(cmd.customerId(), cmd.toLines(), stockChecker);
         orderRepositoryPort.save(order);
-        outboxPort.append(OrderPlacedIntegrationEvent.of(order));     // 落库即事实，投递由 Relay 保证
+        outboxPort.appendAll(order.pullEvents());                     // 领域事件出聚合，落库即事实，投递由 Relay 保证
         return order.getId();
     }
 }
