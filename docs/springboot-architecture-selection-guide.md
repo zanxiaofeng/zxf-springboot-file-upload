@@ -954,7 +954,7 @@ com.example.app                              # 应用根包；读写按代码路
     └── BusinessError.java
 ```
 
-这是无异步投影的 B 基线。需要投影时可加入 `query/consumer` 与投影服务，但必须同时采用[第 8 章](#sec-8)的保证，不把它误称为普通缓存更新。
+这是无异步投影的 B 基线。需要投影时可加入 `query/consumer` 与投影服务，但必须同时采用[第 8 章](#sec-8)的保证，不把它误称为普通缓存更新。任务执行采用消息触发时，按 9.6 在 `command/consumer` 加入任务消费入口。
 
 <a id="layout-hex"></a>
 
@@ -2125,7 +2125,7 @@ void poRuleDetectsResponseSignatureLeak() {
 
 # 附录 G. 贯穿案例：同一"下单"在 A/B/C/D 中的形态
 
-> 同一业务需求贯穿四种组合：**下单（校验库存 → 创建订单 → 支付）+ 查询订单详情**。对照同一逻辑在不同布局中的形态与得失，比单看包结构直观。代码为示意骨架，省略参数校验与异常包装；命名遵循 6.2（查询输出用 View），可靠事件的端口形态对齐附录 C。
+> 同一业务需求贯穿四种组合：**下单（校验库存 → 创建订单 → 支付）+ 查询订单详情**。对照同一逻辑在不同布局中的形态与得失，比单看包结构直观。代码为示意骨架，省略参数校验与异常包装；命名遵循 6.2（查询输出用 View），可靠事件的端口形态对齐附录 C。G.1 的 `Result` 统一响应仅示意 A 布局常见的既有包装约定，不是本文新引入的响应信封（9.1）。
 
 ## G.1 A 经典分层：一个 Service 全包
 
@@ -2250,6 +2250,7 @@ class PlaceOrderHandler {
     }
 }
 // 投影链：Consumer 调投影用例更新读模型（最终一致；去重与本地副作用同事务，对齐附录 C.5）
+// @KafkaListener 仅为示意；本文不绑定具体 MQ SDK（对齐 C.1 的省略声明）
 @Component
 class OrderProjectionConsumer {
     @KafkaListener(topics = "order.order-placed.v1")

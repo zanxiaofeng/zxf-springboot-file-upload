@@ -72,13 +72,13 @@ zxf.upload
 | `stage/*` | 阶段 1 类型校验+ZIP 防护、阶段 2 ClamAV、阶段 3 YARA、阶段 4 文档威胁+宏策略分级 |
 | `ScanPipelineConfig` | 阶段顺序显式装配——顺序即领域规则，新增阶段 = 新实现 + 装配加一行（OCP） |
 | `FileScanService` | 背压闸门（Semaphore）+ 调管道 + 按 `FileDisposition` 执行文件生命周期 |
-| `AsyncScanProcessor` | 异步扫描执行器（@Async 虚拟线程，selection-guide §8.3）+ 结果缓存，供轮询读取（支撑组件，非 Stage） |
+| `AsyncScanProcessor` | 异步扫描执行器（@Async 虚拟线程，selection-guide §9.4）+ 结果缓存，供轮询读取（支撑组件，非 Stage） |
 
 **归属判定记录**（骨架入 domain、实现留 application）：早期论证"管道依赖 infra 引擎客户端故不能入 domain"只对 **Stage 实现**成立；**骨架**（ScanStage/ScanVerdict/ScanContext/ScanPipeline）是零 infra 依赖的纯领域机制，故定义于 `domain/filescan/`（与 ScanResult 等模型同域）。Stage 实现依赖引擎/properties，留 `application/filescan/stage/`（application 实现 domain 接口，依赖方向合法）；`ScanPipelineConfig`（@Configuration）在 application 完成骨架与实现的装配。新增阶段 = 新 Stage 实现 + 装配加一行。
 
 ## 4. 受理边 CQRS 落地要点
 
-- 门面：`fileSyncUpload` / `fileAsyncUpload` / `fileScanStatus`，纯转发无逻辑（异步 = 提交 202 + 轮询查询 + 后台执行器三件套，selection-guide §8.1）
+- 门面：`fileSyncUpload` / `fileAsyncUpload` / `fileScanStatus`，纯转发无逻辑（异步 = 提交 202 + 轮询查询 + 后台执行器三件套，selection-guide §9.1）
 - 写侧时序：Controller `commandOf()` 构造 Command → Checker（委托 domain `UploadPolicy`，规则唯一来源）→ Executor 内 `toUploadFile()` 转换 → staging 落盘 → 管道/受理 → 结果翻译（在 Executor）
 - 读侧：`PollScanResultExecutor.execute(scanId)`（轮询兜底；单参数用例不再包 Query record）
 - 无事务注解：本项目无数据源，扫描管道非事务性
