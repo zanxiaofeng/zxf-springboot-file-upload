@@ -1,4 +1,4 @@
-package zxf.upload.rest.file.representation;
+package zxf.upload.rest.fileupload.representation;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import zxf.upload.domain.filescan.model.ScanResult;

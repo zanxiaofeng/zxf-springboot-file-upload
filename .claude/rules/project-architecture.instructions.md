@@ -9,8 +9,8 @@
 | 模式 | 管什么 | 落点 |
 |------|--------|------|
 | **六边形架构** | 隔离边界：核心（领域+用例）与外部技术（HTTP/引擎/存储）通过端口对接 | 层间依赖方向 + Controller=主适配器 + 引擎客户端=次适配器 |
-| **Pipe-Filter** | 核心域执行结构：扫描流水线的阶段顺序与短路 | `application/filescan/`（§3） |
-| **受理边 CQRS** | 入口用例的读写分离：写（受理上传）/ 读（轮询结果） | `application/command|query/`（§4） |
+| **Pipe-Filter** | 核心域执行结构：扫描流水线的阶段顺序与短路 | 骨架在 `domain/filescan/`，装配与实现在 `application/filescan/`（§3） |
+| **受理边 CQRS** | 入口用例的读写分离：写（受理上传）/ 读（轮询结果） | `application/fileupload`（写）+ `application/filescan`（读）（§4） |
 
 **为什么不是纯 CQRS-lite 项目**：CQRS 的 Command/Checker/Executor 形态面向 CRUD 用例（每用例一段业务编排）；本项目的核心域是"一条扫描流水线"——阶段顺序、短路、上下文传递是领域规则，不是任何单个用例的编排。因此受理边保留 CQRS 用例分离（它确实是"类 CRUD 的薄层"），核心域交给管道模式。
 
@@ -42,21 +42,23 @@
 ```
 zxf.upload
 ├── domain/                     # 核心：两个限界上下文
-│   ├── fileupload/                 # FileUpload 域：UploadFile / UploadPolicy / FileDisposition
-│   └── filescan/                   # FileScan 域：ScanResult / ScanStatus / TypeCheck
-│       └── documentthreat/         # 子域：DocumentThreat / ThreatKind / DocumentThreatScanner
+│   ├── fileupload/                 # FileUpload 域：UploadFile / UploadPolicy
+│   └── filescan/                   # FileScan 域：管道骨架（ScanStage/ScanVerdict/ScanContext/ScanPipeline）
+│       ├── model/                      # ScanResult / ScanStatus / TypeCheck
+│       ├── FileDisposition.java        # 处置映射（ScanStatus → 文件去向）
+│       └── documentthreat/             # 子域：DocumentThreat / ThreatKind / DocumentThreatScanner
 ├── application/
 │   ├── ApplicationService.java     # 应用服务端口（六边形正统组件）：纯转发
-│   ├── command/fileupload/         # FileUpload 写用例：UploadFileCommand + checker/ + executor/{Sync,Async}UploadCommandExecutor
-│   ├── query/filescan/             # FileScan 读用例：PollScanResultExecutor
-│   └── filescan/                   # FileScan 核心：管道（ScanStage/ScanVerdict/ScanContext/ScanPipeline/Config）
-│                                   #   + stage/×4 + FileScanService + AsyncScanProcessor
-├── infrastructure/                 # 次适配器：filescan/（引擎客户端）fileupload/（Staging/Storage）
-│                                   #   config/ domain/（异常体系）rest/（全局处理）health/ io/
+│   ├── fileupload/                 # FileUpload 写用例（平铺，无 command/checker/executor 机制目录）：
+│   │                               #   UploadFileCommand + UploadFileCommandChecker + {Sync,Async}UploadCommandExecutor
+│   └── filescan/                   # FileScan 用例与组件：ScanPipelineConfig（装配，顺序即规则）
+│                                   #   + stage/×4 + FileScanService + AsyncScanProcessor + PollScanResultExecutor
+├── infrastructure/                 # 次适配器：filescan/（ClamAV/YARA 引擎客户端）fileupload/（Staging/Storage）
+│                                   #   config/（Properties + 领域组件 @Bean 装配）domain/（异常体系）rest/（全局处理）health/ io/
 └── rest/
-    ├── fileupload/                 # 主适配器：受理端点 Controller
-    ├── filescan/                   # 主适配器：查询端点 Controller
-    └── file/representation/        # UploadResponse（受理与查询共用）
+    ├── fileupload/                 # 主适配器：受理端点 Controller（Sync/Async）
+    │   └── representation/             # UploadResponse（受理回执模型，受理回执与轮询 body 共用）
+    └── filescan/                   # 主适配器：查询端点 Controller（轮询，消费 fileupload 的 UploadResponse）
 ```
 
 ## 3. 扫描管道（核心域模式）
@@ -70,13 +72,13 @@ zxf.upload
 | `stage/*` | 阶段 1 类型校验+ZIP 防护、阶段 2 ClamAV、阶段 3 YARA、阶段 4 文档威胁+宏策略分级 |
 | `ScanPipelineConfig` | 阶段顺序显式装配——顺序即领域规则，新增阶段 = 新实现 + 装配加一行（OCP） |
 | `FileScanService` | 背压闸门（Semaphore）+ 调管道 + 按 `FileDisposition` 执行文件生命周期 |
-| `AsyncScanProcessor` | 异步任务分发 + 结果缓存 + SSE 推送（支撑组件，非 Stage） |
+| `AsyncScanProcessor` | 异步扫描执行器（@Async 虚拟线程，selection-guide §8.3）+ 结果缓存，供轮询读取（支撑组件，非 Stage） |
 
-**归属判定记录**（为什么管道在 application 而非 domain）：管道依赖 infra 引擎客户端，规范已声明"Application 直接依赖 infrastructure 是放弃依赖倒置后的务实选择"（architecture §1）且"无 Port 接口"；反模式 #13 禁止 Executor 互调，共享管道不能入 executor 包——`application/filescan/` 是规范约束下的唯一合法容器。
+**归属判定记录**（骨架入 domain、实现留 application）：早期论证"管道依赖 infra 引擎客户端故不能入 domain"只对 **Stage 实现**成立；**骨架**（ScanStage/ScanVerdict/ScanContext/ScanPipeline）是零 infra 依赖的纯领域机制，故定义于 `domain/filescan/`（与 ScanResult 等模型同域）。Stage 实现依赖引擎/properties，留 `application/filescan/stage/`（application 实现 domain 接口，依赖方向合法）；`ScanPipelineConfig`（@Configuration）在 application 完成骨架与实现的装配。新增阶段 = 新 Stage 实现 + 装配加一行。
 
 ## 4. 受理边 CQRS 落地要点
 
-- 门面：`fileSyncUpload` / `fileAsyncUpload` / `fileScanStatus` / `fileScanEvents`，纯转发无逻辑
+- 门面：`fileSyncUpload` / `fileAsyncUpload` / `fileScanStatus`，纯转发无逻辑（异步 = 提交 202 + 轮询查询 + 后台执行器三件套，selection-guide §8.1）
 - 写侧时序：Controller `commandOf()` 构造 Command → Checker（委托 domain `UploadPolicy`，规则唯一来源）→ Executor 内 `toUploadFile()` 转换 → staging 落盘 → 管道/受理 → 结果翻译（在 Executor）
 - 读侧：`PollScanResultExecutor.execute(scanId)`（轮询兜底；单参数用例不再包 Query record）
 - 无事务注解：本项目无数据源，扫描管道非事务性
@@ -87,11 +89,11 @@ zxf.upload
 
 ## 6. 已声明的务实偏离（评审时勿当 bug 修）
 
-1. `PollScanResultExecutor` 与门面 `fileScanStatus` 返回 rest 层 `UploadResponse`——SSE data 与轮询 body 的统一响应模型
-2. `ApplicationService.fileScanEvents` 直调 `AsyncScanProcessor`——SSE 订阅语义非标准查询用例
-3. `AsyncScanProcessor` 依赖 rest 类型（偏离 1 的连锁：缓存/推送 UploadResponse）
-4. `FileTypeScanStage` 在 application 层读 `@ConfigurationProperties`——domain 禁依赖 infra，故类型校验不入 domain
-5. `UploadFileCommand` 携带 `InputStream content`——multipart 无 @RequestBody，流是写操作的必要输入；领域对象 `UploadFile` 不含流
+1. `PollScanResultExecutor` 与门面 `fileScanStatus` 返回 rest 层 `UploadResponse`——异步受理回执与轮询 body 的统一响应模型
+2. `AsyncScanProcessor` 依赖 rest 类型（偏离 1 的连锁：缓存 UploadResponse）
+3. `FileTypeScanStage` 在 application 层读 `@ConfigurationProperties`——domain 禁依赖 infra，故类型校验不入 domain
+4. `UploadFileCommand` 携带 `InputStream content`——multipart 无 @RequestBody，流是写操作的必要输入；领域对象 `UploadFile` 不含流
+5. `DocumentThreatScanner`（domain）依赖 POI（重量级第三方库）、Lombok `@Slf4j` 与 `infrastructure.domain.BusinessException`——POI 按指南严格口径应抽端口+适配器，但项目反模式 #12 禁预抽接口，两规范冲突时声明为务实偏离；BusinessException 是 `infrastructure/domain` 跨层技术支撑包的全项目异常唯一出口（architecture §3.5「供全项目跨层使用」），属 §1 依赖规则表 Domain 行的已声明豁免而非技术实现依赖（2026-09-24 决策：补声明，不迁移异常包、不加翻译层）。domain 保持**零 Spring import**（2026-09-23 已达成：UploadFile 改 JDK 原生、本类去 `@Component` 改 `FileScanDomainConfig` @Bean 装配），仅第三方领域库、编译期工具与跨层异常体系豁免
 
 ## 7. 领域规则位置速查
 

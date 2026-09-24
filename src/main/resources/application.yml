@@ -14,7 +14,6 @@ zxf:
     macro-policy: BLOCK        # 含 VBA 宏文档处置：BLOCK=隔离；FLAG=放行并打标告警
     max-file-size: 104857600   # 100MB，与 multipart 对齐
     sync-max-file-size: 20971520   # 20MB，超过则要求异步上传
-    sse-heartbeat-seconds: 15      # SSE 心跳间隔，防代理 idle 断连
     max-concurrent-scans: 16   # 虚拟线程 + 信号量背压（同步/异步统一闸门）
     result-retention-minutes: 30   # 异步结果缓存 TTL，到期淘汰防内存泄漏
     zip:

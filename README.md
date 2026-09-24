@@ -5,7 +5,7 @@
 ## 功能特性
 
 - **四阶段扫描管道**：Tika 类型校验、ClamAV 病毒扫描、YARA 规则匹配、文档威胁检测（VBA 宏 / ActiveX / PDF 危险动作）
-- **同步 / 异步双端点**：`POST /api/files/sync/upload` 同步等待扫描结果（默认 >20MB 拒绝）；`POST /api/files/async/upload` 异步受理，支持 SSE 实时推送 + 轮询兜底
+- **同步 / 异步双端点**：`POST /api/files/sync/upload` 同步等待扫描结果（默认 >20MB 拒绝）；`POST /api/files/async/upload` 异步受理（202 + scanId），轮询获取扫描结果
 - **ZIP 炸弹防护**：条目数、单条目解压大小、累计解压总量、压缩比四重流式校验（OWASP 解压炸弹防护）
 - **背压控制**：信号量统一闸门（默认 16 并发），同步与异步共用，防止并发上传打爆扫描引擎
 - **故障熔断**：Resilience4j 熔断 ClamAV 故障，防止引擎挂起级联拖垮服务；支持 fail-closed（默认，拒绝上传）/ fail-open（放行打标）两种策略
@@ -84,7 +84,6 @@ mvn spring-boot:run
 | POST | `/api/files/sync/upload` | 同步上传，等待扫描完成后返回最终结果 |
 | POST | `/api/files/async/upload` | 异步上传，受理后返回 scanId |
 | GET | `/api/files/async/scan/{scanId}` | 轮询扫描结果 |
-| GET | `/api/files/async/scan/{scanId}/events` | SSE 事件流 |
 
 ### 同步上传
 
@@ -106,13 +105,10 @@ curl -F "file=@big.zip" http://localhost:8080/api/files/async/upload
 { "scanId": "6f0e...", "status": "SCANNING", "message": "扫描进行中", "filePath": null }
 ```
 
-随后通过 SSE 实时接收进度，或轮询获取结果：
+随后轮询获取扫描结果：
 
 ```bash
-# SSE 事件流（扫描完成即推送结果）
-curl -N http://localhost:8080/api/files/async/scan/{scanId}/events
-
-# 轮询兜底（任何时刻可查询）
+# 轮询查询（任何时刻可查询，终态后停止轮询）
 curl http://localhost:8080/api/files/async/scan/{scanId}
 ```
 
@@ -196,8 +192,8 @@ src/main/java/zxf/upload/                 # 六边形骨架 + 管道核心 + 受
 │       ├── ScanPipelineConfig.java         # 阶段顺序显式装配（顺序即领域规则）
 │       ├── stage/                          # FileType（Tika+ZIP 防护）/ ClamAv / Yara / DocumentThreat 实现
 │       ├── FileScanService.java            # Semaphore 背压 + 处置执行 + fail 策略收口
-│       ├── AsyncScanProcessor.java         # 异步任务分发 + 结果缓存 + SSE 推送
-│       └── PollScanResultExecutor.java     # 轮询兜底（直收 scanId）
+│       ├── AsyncScanProcessor.java         # 异步扫描执行（@Async 虚拟线程）+ 结果缓存
+│       └── PollScanResultExecutor.java     # 轮询查询（直收 scanId）
 ├── infrastructure/                 # 基础设施层：技术组件（次适配器）
 │   ├── domain/                         # BusinessException + ErrorCode 异常体系
 │   ├── rest/GlobalExceptionHandler.java # 统一错误响应（单一出口）
@@ -208,11 +204,10 @@ src/main/java/zxf/upload/                 # 六边形骨架 + 管道核心 + 受
 │   └── io/FileUtils.java
 └── rest/                           # 接入层：HTTP ↔ Command 协议转换（零业务逻辑，主适配器）
     ├── fileupload/                     # 受理端点（FileUpload 域）
-    │   ├── FileSyncUploadController.java   # POST /api/files/sync/upload
-    │   └── FileAsyncUploadController.java  # POST /api/files/async/upload
-    ├── filescan/                       # 查询端点（FileScan 域）
-    │   └── ScanResultController.java       # GET /api/files/async/scan/{scanId}[/events]
-    └── file/representation/UploadResponse.java  # 响应模型（record，受理与查询共用）
+    │   ├── FileUploadController.java        # POST /api/files/{sync,async}/upload
+    │   └── representation/UploadResponse.java  # 响应模型（record，受理与查询共用）
+    └── filescan/                       # 查询端点（FileScan 域）
+        └── ScanResultController.java       # GET /api/files/async/scan/{scanId}
 ```
 
 ## 文档

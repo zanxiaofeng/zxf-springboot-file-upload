@@ -10,7 +10,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import zxf.upload.application.ApplicationService;
 import zxf.upload.domain.filescan.model.ScanStatus;
 import zxf.upload.infrastructure.rest.GlobalExceptionHandler;
-import zxf.upload.rest.file.representation.UploadResponse;
+import zxf.upload.rest.fileupload.representation.UploadResponse;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;

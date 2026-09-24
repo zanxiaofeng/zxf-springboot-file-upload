@@ -12,12 +12,12 @@ domain/filescan/      FileScan = 下游：消费 staged 文件，产出结论与
 application/          ApplicationService 唯一门面（{domain}{Action} 命名，纯转发）
 application/fileupload/   FileUpload 用例：UploadFileCommand + UploadFileCommandChecker + {Sync,Async}UploadCommandExecutor
 application/filescan/     FileScan 用例与组件：ScanPipelineConfig（顺序即规则）+ stage/{FileType,ClamAv,Yara,DocumentThreat}ScanStage
-                          + FileScanService（背压+处置）+ AsyncScanProcessor（异步分发/缓存/SSE）+ PollScanResultExecutor（轮询兜底）
+                          + FileScanService（背压+处置）+ AsyncScanProcessor（异步执行/结果缓存）+ PollScanResultExecutor（轮询查询）
 infrastructure/       filescan/（ClamAV/YARA 引擎客户端）、fileupload/（Staging/FileStorage）、config/（FileScanProperties、FileUploadDomainConfig）、
                       domain/（异常体系）、rest/（全局处理）、health/、io/
-rest/fileupload/      FileSyncUploadController + FileAsyncUploadController（FileUpload 受理端点）
-rest/filescan/        ScanResultController（轮询 + SSE，FileScan 查询端点）
-rest/file/representation/  UploadResponse（record，受理与查询共用）
+rest/fileupload/      FileUploadController（FileUpload 受理端点：sync/async 两个 upload 端点）
+rest/filescan/        ScanResultController（轮询查询端点）
+rest/fileupload/representation/  UploadResponse（record，受理回执模型；fileupload 拥有，filescan 查询端点消费）
 ```
 
 - **架构总纲**：六边形架构（隔离边界）+ 管道（核心域执行结构）+ 受理边 CQRS（薄用例读写分离）；完整叙事/组件映射/偏离清单见 `.claude/rules/project-architecture.instructions.md`——与通用规范冲突时以该篇为准

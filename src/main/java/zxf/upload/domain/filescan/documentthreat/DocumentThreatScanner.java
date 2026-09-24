@@ -2,7 +2,6 @@ package zxf.upload.domain.filescan.documentthreat;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.poifs.macros.VBAMacroReader;
-import org.springframework.stereotype.Component;
 import zxf.upload.infrastructure.domain.BusinessException;
 
 import java.io.IOException;
@@ -25,9 +24,11 @@ import java.util.zip.ZipFile;
  * 内存策略：PDF 分块流式读取；OOXML 仅遍历条目名；OLE2 宏模块由 POI
  * VBAMacroReader 提取（POI API 全量返回 Map，属已知限制），检测阶段
  * 逐模块进行、不额外拼接副本。
+ *
+ * 纯 POJO（无 Spring 注解），由 infrastructure/config/FileScanDomainConfig
+ * 以 @Bean 装配——同 UploadPolicy 的 FileUploadDomainConfig 先例。
  */
 @Slf4j
-@Component
 public class DocumentThreatScanner {
     /** 分块窗口 1MB，重叠 64B 防止关键字跨块漏检 */
     private static final int CHUNK = 1 << 20;

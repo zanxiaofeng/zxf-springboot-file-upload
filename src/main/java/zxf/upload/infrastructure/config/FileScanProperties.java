@@ -54,10 +54,6 @@ public class FileScanProperties {
     @Min(0)
     private long syncMaxFileSize = 20L << 20;
 
-    /** SSE 心跳间隔（秒）：防止中间代理 idle 断连（nginx 默认 60s） */
-    @Min(1)
-    private long sseHeartbeatSeconds = 15;
-
     @Min(1024)
     private long maxFileSize = 100 * 1024 * 1024; // 100MB
 
