@@ -13,8 +13,6 @@ allowed-tools:
 disallowed-tools:
   - Bash(rm -rf *)
   - Bash(git push *)
-paths:
-  - "**/.wiki/**"
 ---
 
 # Repo Wiki
