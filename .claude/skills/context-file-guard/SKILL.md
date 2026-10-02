@@ -13,11 +13,6 @@ allowed-tools:
 disallowed-tools:
   - Bash(rm -rf *)
   - Bash(git push *)
-paths:
-  - "CLAUDE.md"
-  - "AGENTS.md"
-  - "**/CLAUDE.md"
-  - "**/AGENTS.md"
 ---
 
 # Context File Guard
