@@ -2206,7 +2206,7 @@ class PlaceOrderService implements PlaceOrderUseCase {
     public OrderId place(PlaceOrderCmd cmd) {
         Order order = Order.place(cmd.customerId(), cmd.toLines(), stockChecker);
         orderRepositoryPort.save(order);
-        eventPublisherPort.publish(order.releaseEvents());            // 聚合收集事件，应用层统一发布（7.2②，对齐附录 C.2）
+        eventPublisherPort.publish(order.releaseEvents());            // 进程内发布端口，非 Outbox 发布契约；聚合收集事件，应用层统一发布（7.2②，对齐附录 C.2）
         return order.getId();
     }
 }
@@ -2221,7 +2221,7 @@ class OrderController {
     @GetMapping("/orders/{id}")
     public OrderDetailView detail(@PathVariable String id) {
         Order order = queryOrderUseCase.detail(new OrderDetailQuery(id));
-        return orderWebMapper.toView(order);                          // Model → View 同样在适配器内（4.4）
+        return orderWebMapper.toView(order);                          // Model → View 同样在适配器内（4.2）
     }
 }
 // 查询用例：读链同样经 port.in/port.out（附录 A.3 的 QueryOrderUseCase）；用例返回领域对象，View 转换归适配器
@@ -2282,6 +2282,3 @@ class OrderQueryService {
 ---
 
 从当前问题出发选择组合，用明确边界约束复杂度，再用与风险匹配的验证守住保证。架构的价值在于让业务更容易正确地演进，而不是让目录看起来更复杂。
-
-
-
