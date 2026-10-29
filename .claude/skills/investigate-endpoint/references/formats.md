@@ -132,15 +132,14 @@
 操作动词 + 路径模板；同一业务的多个操作按次序列出：
 
 ```
-1. 上传暂存 — 文件系统
-   write  {uploadDir}/{uuid}.{ext}        ← 请求流原样落盘
+1. 对账结果落盘 — 文件系统
+   write  {workDir}/{batchId}.csv          ← 批处理结果写出
 
-6. 处置 — 文件系统（按处理结果分流）
-   成功:   copy   {uploadDir}/{uuid}.{ext} → {archiveDir}/{yyyyMM}/{uuid}.{ext}
-           delete {uploadDir}/{uuid}.{ext}
-   失败:   move   {uploadDir}/… → {deadLetterDir}/{uuid}.failed
+6. 归档 — 文件系统（按处理结果分流）
+   成功:   move   {workDir}/{batchId}.csv → {archiveDir}/{yyyyMM}/{batchId}.csv
            （跨文件系统 move 失败降级 copy+delete）
-   拒绝:   delete {uploadDir}/{uuid}.{ext}
+   失败:   move   {workDir}/… → {failedDir}/{batchId}.failed
+   收尾:   delete {workDir}/{batchId}.csv  ← 无论分流去向，工作区清理
 ```
 
 要点：路径来自配置要写配置键/环境变量；目录权限（如 0700）、失败降级链、临时文件清理责任写全。
@@ -183,9 +182,9 @@
 不算出站系统，但为保序完整仍编号列出，**末尾标注**：
 
 ```
-5. 文档结构解析 — 进程内（{解析库}），无外部系统
-   read {uploadDir}/{uuid}.{ext}
-   按格式分流：压缩容器遍历条目名 / 结构化格式逐节点解析 / 分块扫描关键字
+5. 报文结构校验 — 进程内（{解析库}），无外部系统
+   parse {payload 来源：入站请求/本地中间数据}
+   按内容分流：schema 校验 / 逐节点解析 / 大报文分块扫描
 ```
 
 ***
