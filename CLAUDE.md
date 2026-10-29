@@ -54,5 +54,5 @@ rest/fileupload/representation/  UploadResponse（record，受理回执模型；
 ## 子代理 / 技能 / 命令
 
 - `.claude/agents/`：`code-reviewer`、`security-auditor`、`tdd-guide`、`build-error-resolver`
-- `.claude/skills/`：`add-endpoint`、`implement-feature`、`refactor-module`
+- `.claude/skills/`：`add-endpoint`、`implement-feature`、`refactor-module`、`investigate-endpoint`（endpoint 链路调查报告）、`repo-wiki`、`context-file-guard`
 - `.claude/commands/`：`/code-review`、`/security-audit`（`context: fork` 路由到对应子代理）
