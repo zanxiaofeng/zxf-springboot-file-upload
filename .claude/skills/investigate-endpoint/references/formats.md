@@ -39,7 +39,7 @@
    INSERT INTO orders (user_id, amount, status, created_at)
    VALUES (?, ?, ?, ?)                    ← OrderRepository.save() 派生，时间戳由实体回调填充
 
-2. 查询用户 — Database（对象查询语言原文）
+3. 查询用户 — Database（对象查询语言原文）
    SELECT u FROM User u JOIN FETCH u.orders WHERE u.id = :id
                                           ← 附 SQL 对照: SELECT … FROM users u JOIN orders o …
 ```

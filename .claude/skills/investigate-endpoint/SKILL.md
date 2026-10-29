@@ -16,7 +16,7 @@ description: Investigate a web API endpoint's full execution path and produce a 
 
 ## 调查流程（先读完代码再写报告，禁止边读边猜格式）
 
-1. **定位入口** — route 定义处（定位方法见「入口定位速查」）。记录：HTTP method、path 模板、参数来源（path / query / header / body——JSON、XML、multipart 表单、二进制流等）、入站前置限制（请求体大小上限、过滤器/中间件、认证与授权）。
+1. **定位入口** — route 定义处（定位方法见「入口定位速查」）。记录：HTTP method、path 模板、参数来源（path / query / header / cookie / body——JSON、XML、multipart 表单、二进制流等）、入站前置限制（请求体大小上限、过滤器/中间件、认证与授权）。
 2. **沿调用链下行** — handler → 应用服务/用例层 → 领域逻辑 → 基础设施客户端，每跳记 `file:line`，直到触及进程边界。注意纯转发层（门面/代理）——真正的编排在它下一层，别在此停。
 3. **识别出站交互** — 判定标准：**跨进程 / 跨网络 / 跨信任边界**。三类：
    - 网络出站：下游 HTTP/gRPC、数据库、缓存、消息队列、邮件、对象存储、自定义 TCP/UDP 协议
@@ -65,6 +65,7 @@ Outbounds:   （按运行时执行次序编号；<此行写短路/并行/背压�
 ### Inbound 规范
 
 - method + **路由模板**；Content-Type 必写；认证方式（Bearer / Basic / API Key / OAuth）在 headers 中体现；非 JSON 请求体（multipart 表单、XML、二进制流）按原生结构展示，不笼统略过
+- 非 HTTP 入口（gRPC 服务端 method / MQ 消费者 / 定时任务）不用 `METHOD path` 骨架，改用该入口的原生形态——gRPC 写全限定 method 名 + request/response message，MQ 消费写 `CONSUME {topic/queue} + 处理逻辑 + ack 方式`，形态参照 `references/example.md` 案例 A
 - 请求/响应示例用**真实字段名**（从请求/响应模型实证），动态值 `{占位符}` 或真实形态（UUID）
 - 序列化细节要体现：核实哪些字段真正出现在响应里（null 省略、字段命名 camelCase/snake_case、包装信封）
 - 成功响应之外，**错误分支逐行列出**：状态码 + 错误码 + 触发条件（含由哪个 Outbound 失败引起）——错误覆盖度是报告质量的主要区分点
@@ -93,7 +94,8 @@ Outbounds:   （按运行时执行次序编号；<此行写短路/并行/背压�
 
 ## 调查深度规则
 
-- Outbounds 只列**本服务直接发出**的出站调用；下游服务自己的依赖（下游的下游）不展开，在该条目内注明去向即可（如「cart 服务自有 Redis 持久化，不在本层展开」）。
+- Outbounds 只列**本 endpoint 链路实际触达**的调用；同一客户端/仓库里本链路不经过的方法不列入（可作为附注参考路径，见 `references/example.md` 案例 B 的 getOwner）。
+- 出站调用只展开到**本服务直接发出**的一跳；下游服务自己的依赖（下游的下游）不展开，在该条目内注明去向即可（如「cart 服务自有 Redis 持久化，不在本层展开」）。
 - 跨服务全链路调查（trace 视角）时：每服务一份报告，或按「上游入口 → 第一跳下游」注明层级归属。
 - 客户端可见的错误分支要追到**发起翻译的那一层**——下游错误常在上游网关/frontend 被翻译成 HTTP 状态码（如 gRPC 错误 details 前缀 → 422），分支写在翻译层，不在错误发生层。
 

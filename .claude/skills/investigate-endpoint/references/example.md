@@ -131,8 +131,9 @@ Authorization: Basic …              ← @PreAuthorize("hasRole(@roles.OWNER_AD
 → 错误分支（ExceptionControllerAdvice，ProblemDetail RFC 9457 格式）
   401 / 403        未认证 / 角色不足（OWNER_ADMIN）
   400              Bean Validation 失败（MethodArgumentNotValidException → ProblemDetail）
-  404              DataIntegrityViolationException → 404（该项目特有映射——数据冲突按
-                   404 表达，调查时如实记录并加注，不按"应该 409"臆改）
+  404              DataIntegrityViolationException（来自 Outbound 1 约束冲突）→ 404
+                   （该项目特有映射——数据冲突按 404 表达，调查时如实记录并加注，
+                   不按"应该 409"臆改）
   500              兜底（ProblemDetail）
 ```
 
