@@ -77,14 +77,19 @@
 | 触发条件 | 主链路必经 |
 | 处理逻辑 | ① CALL GetCart ② 取 items 返回主流程 |
 | 失败处理 | 致命：下单中止 → RPC error |
-| 幂等与重试 | 无重试；无超时配置（deadline 未显式设置） |
+| 保护与幂等 | 无重试；无超时配置（deadline 未显式设置） |
 
 ##### Method 与 Message
 - `CALL oteldemo.CartService/GetCart`；request `{ userId }`；response `{ items[{ productId, quantity }] }`
 
-##### Deadline / 状态码处置
-- Deadline: 未显式设置（gRPC 默认无限等待）
-- 状态码处置：任何错误 → 下单中止 → RPC error
+##### Deadline
+- 未显式设置（gRPC 默认无限等待）
+
+##### 状态码处置
+- 无按状态码区分的处置——任何错误同等对待
+
+##### 失败处理
+- 任意错误 → 下单中止 → RPC error（`src/checkout/main.go`）
 
 ### O2. gRPC → product-catalog + currency（逐商品组装，循环 2N 次）
 
@@ -95,11 +100,20 @@
 | 触发条件 | 主链路必经（循环：逐商品 a→b 串行，N 件商品 = 2N 次调用） |
 | 处理逻辑 | ①（循环：每件商品）CALL GetProduct 取 name/usd ② CALL Convert 换算到 userCurrency |
 | 失败处理 | 致命：任一次失败 → 下单中止 → RPC error |
-| 幂等与重试 | 无重试；deadline 未显式设置 |
+| 保护与幂等 | 无重试；deadline 未显式设置 |
 
 ##### Method 与 Message
 - a. `CALL oteldemo.ProductCatalogService/GetProduct`（addr=${PRODUCT_CATALOG_ADDR}）；request `{ id }`；response `{ name, usd }`
 - b. `CALL oteldemo.CurrencyService/Convert`（addr=${CURRENCY_ADDR}）；request `{ from=USD, to={userCurrency}, units, nanos }`；response `{ currencyCode, units, nanos }`
+
+##### Deadline
+- 未显式设置（两个调用均无）
+
+##### 状态码处置
+- 无按状态码区分的处置——任一次失败即中止
+
+##### 失败处理
+- 任一次失败 → 下单中止 → RPC error（`src/checkout/main.go`）
 
 ### O3. 下游 HTTP → shipping 服务（运费报价）
 
@@ -110,7 +124,7 @@
 | 触发条件 | 主链路必经 |
 | 处理逻辑 | ① POST /get-quote ② 取 costUsd 参与合计 |
 | 失败处理 | 致命：下单中止 → RPC error |
-| 幂等与重试 | 无重试；无超时配置 |
+| 保护与幂等 | 无重试；无超时配置 |
 
 ##### Request
 - Method / Path: `POST ${SHIPPING_ADDR}/get-quote`
@@ -134,10 +148,19 @@
 | 触发条件 | 主链路必经 |
 | 处理逻辑 | ① CALL Convert（与 O2b 同一方法，from=USD，amount=运费） |
 | 失败处理 | 致命：下单中止 → RPC error |
-| 幂等与重试 | 无重试；deadline 未显式设置 |
+| 保护与幂等 | 无重试；deadline 未显式设置 |
 
 ##### Method 与 Message
 - `CALL oteldemo.CurrencyService/Convert`；request `{ from=USD, to={userCurrency}, amount=运费 }`；response `{ currencyCode, units, nanos }`
+
+##### Deadline
+- 未显式设置（gRPC 默认无限等待）
+
+##### 状态码处置
+- 无按状态码区分的处置——任何错误同等对待
+
+##### 失败处理
+- 任意错误 → 下单中止 → RPC error（`src/checkout/main.go`）
 
 ### O5. gRPC → payment 服务（扣款）
 
@@ -148,10 +171,19 @@
 | 触发条件 | 主链路必经（条件：feature flag `paymentUnreachable` 开启时故意连向坏地址——demo 故障注入） |
 | 处理逻辑 | ① CALL Charge（amount=商品+运费合计） ② 取 transactionId 进订单 |
 | 失败处理 | 致命：下单中止 → RPC error；frontend 依错误 details 前缀翻译为 422（见补充说明） |
-| 幂等与重试 | 无重试；deadline 未显式设置 |
+| 保护与幂等 | 无重试；deadline 未显式设置 |
 
 ##### Method 与 Message
 - `CALL oteldemo.PaymentService/Charge`；request `{ userId, creditCard, amount { currency, units+nanos } }`；response `{ transactionId }`
+
+##### Deadline
+- 未显式设置（gRPC 默认无限等待）
+
+##### 状态码处置
+- 无按状态码区分的处置——任何错误同等对待
+
+##### 失败处理
+- 任意错误 → 下单中止 → RPC error；frontend 依错误 details 前缀翻译为 422（见补充说明，`src/checkout/main.go`）
 
 ### O6. 下游 HTTP → shipping 服务（发货下单）
 
@@ -162,7 +194,7 @@
 | 触发条件 | 主链路必经 |
 | 处理逻辑 | ① POST /ship-order ② 取 trackingId 进订单 |
 | 失败处理 | 致命：下单中止 → RPC error |
-| 幂等与重试 | 无重试；无超时配置 |
+| 保护与幂等 | 无重试；无超时配置 |
 
 ##### Request
 - Method / Path: `POST ${SHIPPING_ADDR}/ship-order`；Headers: `Content-Type: application/json`
@@ -185,10 +217,19 @@
 | 触发条件 | 主链路必经（下单成功后） |
 | 处理逻辑 | ① CALL EmptyCart ② 错误显式丢弃（源码忽略错误） |
 | 失败处理 | 静默忽略——用户可重放，不影响已成交订单 |
-| 幂等与重试 | 无重试；deadline 未显式设置 |
+| 保护与幂等 | 无重试；deadline 未显式设置 |
 
 ##### Method 与 Message
 - `CALL oteldemo.CartService/EmptyCart`；request `{ userId }`
+
+##### Deadline
+- 未显式设置（gRPC 默认无限等待）
+
+##### 状态码处置
+- 无处置——错误被显式丢弃
+
+##### 失败处理
+- 任意错误 → 显式忽略（源码丢弃错误），用户可重放（`src/checkout/main.go`）
 
 ### O8. 下游 HTTP → email 服务（订单确认邮件）
 
@@ -199,10 +240,13 @@
 | 触发条件 | 主链路必经（下单成功后） |
 | 处理逻辑 | ① POST /send_order_confirmation（email + 订单全文） |
 | 失败处理 | 降级：仅记 WARN 日志，不影响下单结果 |
-| 幂等与重试 | 无重试；无超时配置 |
+| 保护与幂等 | 无重试；无超时配置 |
 
 ##### Request
 - Method / Path: `POST ${EMAIL_ADDR}/send_order_confirmation`；Body: `{ "email": "{customerEmail}", "order": {…订单全文} }`
+
+##### Response — Success
+- Status: `200`；响应 body 无业务消费（源码不解析——告知性调用）
 
 ##### Response — Failed
 | 场景 | 状态码 / 异常 | 本地行为 | 源码依据 |
@@ -218,14 +262,20 @@
 | 触发条件 | 异步：不阻塞下单响应；条件：`${KAFKA_ADDR}` 为空时整步跳过 |
 | 处理逻辑 | ① 序列化 OrderResult（protobuf） ② 异步 SEND ③ 携带 W3C traceparent header |
 | 失败处理 | 异步尽力而为：发送失败只进 error 日志，可能丢消息 |
-| 幂等与重试 | 无本地重试；`RequiredAcks=NoResponse`（at-most-once） |
+| 保护与幂等 | 无本地重试；`RequiredAcks=NoResponse`（at-most-once） |
 
 ##### 消息定义
 - `SEND topic=${KAFKA_TOPIC:-orders}`；payload（protobuf OrderResult）: `{ orderId, shippingTrackingId, shippingCost, shippingAddress, items, transactionId }`
 - Headers: W3C traceparent（消费侧 fraud-detection 以此关联链路）
 
+##### 发送模式
+- 异步生产者（不阻塞下单响应）；条件：`${KAFKA_ADDR}` 为空时整步跳过
+
 ##### 可靠性
 - 确认: `RequiredAcks=NoResponse`；投递语义: at-most-once（可能丢消息，下游需知晓）
+
+##### 失败处理
+- 发送失败只进 error 日志（`src/checkout/kafka/producer.go`）
 
 ## 补充说明
 
@@ -288,7 +338,7 @@
 | 触发条件 | 主链路必经 |
 | 处理逻辑 | ① persist Owner 实体 ② IDENTITY 策略取回主键回填 ③ 提交 |
 | 失败处理 | 约束冲突 → DataIntegrityViolationException → I1 映射表 404 行 |
-| 幂等与重试 | 无重试；无显式事务注解（见事务与隔离段） |
+| 保护与幂等 | 无重试；无显式事务注解（见事务与隔离段） |
 
 ##### Statement
 - 操作类型: INSERT
@@ -329,4 +379,5 @@
 | 控制流标注 | O2 循环 2N 次、O5 feature flag、O9 条件跳过 + 异步 | 无 |
 | 失败处理分级 | 致命 / 静默 / 降级 / 异步四档（元信息表「失败处理」字段） | 失败即 500（映射表单行） |
 | 空值语义示范 | O1–O5 deadline「未显式设置」；I1 鉴权「无」 | O1 事务「无注解，框架默认承担」 |
+| schema 齐整性 | 每张 O 卡片小节按 §三 schema 齐备（信息少的段用一行事实陈述） | 同 |
 | 特有教学点 | 错误跨层传播（422 由 frontend 翻译）；下游的下游不展开 | contract-first 入口定位；错误映射如实记录（404 而非想当然的 409） |
