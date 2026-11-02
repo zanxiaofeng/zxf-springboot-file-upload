@@ -1,6 +1,6 @@
 ---
 name: investigate-endpoint
-description: Investigate a web API endpoint's full execution path and produce a structured Inbound/Outbounds report. Use when asked to investigate, analyze, or trace an endpoint, its call chain, request handling flow, or what an API does（调查/梳理某个接口、API 调用链、请求处理流程）.
+description: Investigate a web API endpoint's full execution path and produce a structured Inbound/Outbounds report. Use when asked to investigate, analyze, or trace an endpoint, its call chain, request handling flow, or what an API does（调查/梳理某个接口、API 调用链、请求处理流程）. Not for explaining a single function or general code reading that needs no outbound tracing（仅解释单个函数、无需追踪出站交互的代码阅读不适用）.
 ---
 
 # Investigate Endpoint — API 执行链路调查报告
@@ -85,6 +85,19 @@ description: Investigate a web API endpoint's full execution path and produce a 
 - 出站只展开到**本服务直接发出**的一跳；下游服务自己的依赖（下游的下游）不展开，在该卡片内注明去向即可（如「cart 服务自有 Redis 持久化，不在本层展开」）
 - 进程内重计算照常编号，类型写「进程内」，末尾标注「无外部系统」
 
+## 简洁与去重（密度与结构同等强制）
+
+结构约束「写什么」，本节约束「写多少、写几遍」：
+
+- **单一事实源**：每个事实只在拥有它的位置完整写一次，别处只留编号引用——
+  - 元信息表「失败处理」字段写一句话分级去向（致命：中止本链路 / 静默忽略 / 降级 → 见失败处理表）；具体异常分支**只进**类型子结构「失败处理」表，两处不得展开同一分支
+  - 「下游依赖」只列 O 编号；处理逻辑写 `③ 调用 O2 扣减库存`，不展开 O2 内部（下游细节住在对方卡片）
+  - 处理逻辑不复述错误码值，写「校验失败 → 见错误映射表」
+- **密度校准**：处理逻辑超过约 7 步、或单步超过一行时，通常是在展开下游内部或复述代码字面——删掉展开，改成意图描述
+- **禁止复述代码字面**：❌ `if (userId == null) throw new BizException(40001)` ✅ `空值校验，缺 userId 抛 40001`
+- **补充说明区只放跨条目信息**（跨卡片的传播/降级全貌、「无 X」声明），禁止复述任何单张卡片内容
+- **平衡原则**：删的是复述与展开，不删 `file:line`、错误码、副作用、空值语义——目标是信息密度，不是字数少
+
 ## 质量自查（报告发出前）
 
 - [ ] 每个协议细节都能给出 `file:line` 依据，无臆造（参数名、报文、SQL、默认值）
@@ -92,6 +105,7 @@ description: Investigate a web API endpoint's full execution path and produce a 
 - [ ] I 与 O 卡片结构对称：均为「元信息表 → 处理逻辑 → 类型专属子结构」三段式
 - [ ] 编号闭环：I1「下游依赖」列出的每个 O 编号在报告中均有对应卡片；每个 O 卡片能在至少一个 I 或上游 O 卡片中被引用（无孤儿 O、无悬空引用）
 - [ ] 处理逻辑为 ①②③ 编号步骤，无叙述性段落；全篇无超过 3 行的无标题段落
+- [ ] 唯一性：同一事实（错误分支 / 保护参数 / 下游行为）完整描述只出现一次，其余为编号引用；元信息表「失败处理」与子结构失败处理表无重复展开
 - [ ] Inbound 错误映射表覆盖认证 + 成功 + 全部错误分支（端点无认证时在元信息表显式写无），错误码与状态码经错误处理层（全局 handler / 错误中间件）核实，每行含映射位置与是否泄漏内部信息
 - [ ] 每个 Outbound 的失败处理 / Failed 表每行含 `file:line`；代码中不存在的分支以「无 X」事实行表达，无编造
 - [ ] 配置默认值 / 环境变量已从真实读取点核实，保留 `${ENV:default}` 原样
