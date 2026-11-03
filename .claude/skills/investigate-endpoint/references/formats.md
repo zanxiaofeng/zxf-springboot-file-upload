@@ -1,392 +1,347 @@
 # 报告 Schema 模板库（Inbound + Outbound）
 
-写报告前查阅——按目标类型直达对应小节即可，无需全文通读。四部分：§一 卡片总模板（I / O 通用三段式）、§二 Inbound 类型专属 schema、§三 Outbound 类型专属 schema（12 类）、§四 速查表。
+写报告前查阅——按目标类型直达对应小节，无需全文通读。六部分：§一 总原则（最小充分与省略判据）、§二 卡片总模板（主路径 + 折叠区 + 字段/语言/符号规范）、§三 代码块与坐标配额、§四 Inbound 类型专属 schema、§五 Outbound 类型专属 schema（12 类）、§六 速查表。
 
-原则：
+## 一、总原则：schema 是菜单，不是清单
 
-- schema 字段的**值**保持原生格式——SQL 原文、原生 JSON 报文、命令序列、C:/S: 报文交换图；「结构化」约束的是报告骨架，不是把报文改写成散文
-- 动态值用 `{占位符}`，可变配置保留 `${ENV:default}` 形式
-- 模板中的示例是通用业务场景（订单/通知/归档），调查时一律替换为**目标代码实证出的真实值**
-- **空值语义**：字段 / 小节在代码中无对应事实时写一行显式事实陈述（「无重试」「无超时配置，默认无限等待」），禁止编一行来填表——模板中的「无 X」示例即此用法
+schema 列出的是「可以写什么」——按实际发现挑选要写的项，未发现的项**整段不出现**。模板示例是通用业务场景（订单/通知/归档），一律替换为目标代码**实证**出的真实值；动态值 `{占位符}`，可变配置保留 `${ENV:default}` 原样；schema 字段的**值**保持原生格式——SQL 原文、原生 JSON 报文、命令序列、C:/S: 报文交换图（均为折叠区内容）。
 
-***
+**每卡最小集**（缺一不成卡）：编号（I1 / O2）、类型、目标、一句话摘要、主坐标。
 
-## 一、卡片总模板（I / O 通用三段式：元信息表 → 处理逻辑 → 类型专属子结构）
+**按需项出现门槛**——「读者猜不到」且「影响行为」两条同时成立才写：
 
-处理逻辑粒度：一个步骤 ≈ 一次跨方法边界的调用，或一组不可再分的本地操作（如空值 + 格式 + 范围校验合并为一步「参数校验」）；循环合并为一步并标注次数。
-
-Inbound 卡片（子结构按入口类型选 §二 schema）：
-
-### I1. HTTP Server → POST /api/orders
-
-| 字段 | 内容 |
-|---|---|
-| 暴露方式 | HTTP Server / gRPC Server / MQ Consumer / 定时任务 / CLI / Webhook / 事件监听 |
-| 入口点 | {类.方法}（`file:line`） |
-| 路由/契约 | `POST /api/orders` / `oteldemo.OrderService/CreateOrder` / `topic=order.created` |
-| 触发方式 | 同步请求 / 异步消费 / 周期触发（cron）/ 外部推送 |
-| 鉴权与限流 | JWT / Basic / API-Key / 无；限流规则及来源 `file:line` |
-| 幂等 | 幂等键 {…} / 天然幂等 / 无（如实写——它决定重放后果） |
-| 处理逻辑 | ① 校验入参 ② 鉴权 ③ 调用 O1 ④ 调用 O2（条件：库存校验开启时） ⑤ 落库（O2） ⑥ 组装响应 |
-| 下游依赖 | O1、O2、O3（见对应卡片） |
-
-{入口类型专属子结构，见 §二}
-
-Outbound 卡片（子结构按出站类型选 §三 schema）：
-
-### O1. 下游 HTTP → 库存服务
-
-| 字段 | 内容 |
-|---|---|
-| 类型 | 下游 HTTP / gRPC / DB / 缓存 / MQ / SFTP / 对象存储 / 子进程 / 文件系统 / SMTP / 自定义协议 / 进程内 |
-| 触发点 | {类.方法}（`file:line`） |
-| 触发条件 | 主链路必经 / 条件分支（{条件}）/ 异步 |
-| 处理逻辑 | ① … ② …（循环：逐条目 N 次） ③ …（与 ② 并行） |
-| 失败处理 | 致命（中止本链路）/ 静默忽略 / 降级 / 异步补偿——落到具体异常与后续状态 |
-| 保护与幂等 | 超时 {N}s / 无超时配置；重试 {N} 次（退避 {…}）/ 无重试；幂等键 {…} / 无 |
-| file:line | 客户端 `x:y`、调用点 `a:b`、错误映射 `c:d` |
-
-{出站类型专属子结构，见 §三}
-
-***
-
-## 二、Inbound 类型专属 Schema
-
-多入口规则：同一 handler 被多种方式触发（HTTP + MQ、API + 定时任务）→ 每个入口一张独立 I 卡片，共享同一 O 编号空间，每张 I 的「下游依赖」只列自己链路实际触达的 O；同一方法多路由映射（`@PostMapping({"/a", "/b"})`）→ 合并为一张 I 卡片，路由字段列全部路由。
-
-### 2.1 HTTP / gRPC Server（同步服务入口）
-
-三件套必填：`Request（入参契约）/ Response — Success / Response — Failed（错误映射表）`。
-
-##### Request（入参契约）
-- Method / Path: `POST /api/orders`（路由模板；gRPC 写全限定 method `oteldemo.OrderService/CreateOrder` + request message）
-- 契约定义位置: `OrderController.java:34`（注解 / 路由表 / OpenAPI spec——contract-first 项目查 spec 的 `operationId`）
-- 参数: Path `{orderId}`（string, 必填）；Query `?expand={…}`；Headers `Authorization: Bearer <jwt>`
-- Body 模型: `CreateOrderRequest { skuId, qty }`（`dto/CreateOrderRequest.java:12`）；非 JSON（multipart / XML / 二进制流）按原生结构展示
-- 校验规则: `@NotNull skuId`、`qty >= 1`（`OrderController.java:40` / `@Valid`）
-- 平台级限制: 请求体上限 {N}MB（与业务校验分开归因）
-
-##### Response — Success
-- Status: `201`
-- Body: `{ "orderId": "{uuid}", "status": "CREATED" }`（核实真实字段：null 省略、命名 camelCase/snake_case、包装信封）
-- 组装位置: `OrderController.java:58`；写副作用: 创建 Order 记录（属 O2）
-- 异步受理形态: `202` + 轮询地址 / 回调，注明结果如何查询
-
-##### Response — Failed（错误映射表——Inbound 特有必填）
-| 内部异常 / 场景 | 错误来源 | 对外响应 | 映射位置 | 是否泄漏内部信息 |
-|---|---|---|---|---|
-| 参数校验失败 | 本地校验 | `400 {"code":"INVALID_ARG"}` | `GlobalExceptionHandler.java:20` | 否 |
-| 未认证 | 鉴权 | `401` | `AuthFilter.java:30` | 否 |
-| 库存不足（O1 传播） | 下游传播 | `409 {"code":"INSUFFICIENT"}` | `OrderService.java:96` | 否 |
-| 下游 5xx（O1） | 下游传播 | `503 {"code":"DEPENDENCY_UNAVAILABLE"}` | `GlobalExceptionHandler.java:41` | 否 |
-| 未捕获异常 | 未捕获 | `500 {"code":"INTERNAL"}` | `GlobalExceptionHandler.java:55` | 需确认是否含堆栈 |
-
-> 规则：错误来源分四类（本地校验 / 鉴权 / 下游传播 / 未捕获）；跨层翻译（gRPC → HTTP 等）写**发起翻译的那一层**的位置；每行 `file:line`；代码中无对应的分支（如无限流）在元信息表写「无」，不进表。
-
-### 2.2 MQ Consumer（异步消费入口）
-
-##### 消息契约
-- Topic / Queue: `order.created`；消费组: `order-service`
-- Message Body: `{...}`；Headers: `traceId`
-- 反序列化与 Schema 校验位置: `...:line`
-
-##### 消费语义
-- 模式: 推 / 拉；并发度 {N}；顺序性要求 {按 key 保序 / 无}
-- 幂等: `messageId` 去重表 / 天然幂等 / 无
-- 重试与 DLQ: 重试 {N} 次 → 死信队列 `order.created.dlq` / 无 DLQ（写明毒消息的去向）
-
-##### 失败处理
-| 场景 | 本地行为 | 源码依据 |
+| 判定 | 处理 | 例 |
 |---|---|---|
-| 业务异常 | nack 重试 {N} 次 / 直接 DLQ | `...` |
-| 反序列化失败 | 转 DLQ + 告警 | `...` |
+| 默认值 | 省略 | 框架默认 200、默认无限流、默认无重试 |
+| 显然行为 | 省略 | GET 无请求体、POST 有请求体、DB 写入有事务 |
+| 必然推论 | 省略 | 写了 `@Transactional` 不再单列「异常回滚」；写了「调用 O1 扣库存」不再列「依赖库存服务」 |
+| **会猜错的无** | **必写**（关键事实/Summary 风险） | 超时未配置、错误码非标准、幂等键缺失、异步旁路、隐式出站、at-most-once 丢消息 |
 
-### 2.3 定时任务 / CLI / 事件监听
+**省略三档**：省略（整段不出现）✅；置空（字段在、值写「无 / 不适用 / N/A」）❌；写废话（「无特殊错误映射」）❌❌。空值语义只剩一条：**不编造**——代码中不存在的事实一行都不写；「无 X」只在它属于「会猜错的无」时出现（如「无超时配置，默认无限等待」「无幂等，重放产生重复订单」）。
 
-统一四段：
+## 二、卡片总模板（主路径 + 折叠区）
 
-- **触发定义**: cron `{...}` / 命令行 `{...}` / 事件源 `{...}`；并发控制 {单实例锁 / 允许并行}
-- **入参来源**: 环境变量 / 命令行参数 / 事件体
-- **主处理逻辑**: ①②③（引用 O 编号）
-- **失败处理**: 重试、告警、幂等、漏跑补偿（错过的周期如何补）
+一张卡片 = 一个业务动作（不是一次调用）：动作内多方法组合用 a/b 子条目、循环用次数标注表达，不拆卡；`O{n}` 的 n = 运行时执行次序；I 与 O 独立编号空间，卡片间以编号互相引用形成调用图。
 
-***
+### 主路径（折叠区外 ≤ 10 行，按渲染行计、不含空行）
 
-## 三、Outbound 类型专属 Schema
+Outbound 例：
 
-### 3.1 下游 HTTP
+```
+### O1. 下游 HTTP → 库存服务（JSON over REST）
 
-三件套必填：`Request / Response — Success / Response — Failed`。客户端库（RestClient / WebClient / axios / fetch / http.Client…）写在 Request 首行。
+| 路由 | 主坐标 |
+|---|---|
+| `POST /deduct` | client/StockClient.java:55 |
 
-##### Request
-- Method / Path: `POST ${NOTIFICATION_BASE_URL:-http://notify.internal}/api/v1/notifications`（{客户端库}）
-- Headers: `Content-Type: application/json`；`Authorization: Bearer {token 的来源：配置/令牌服务/请求透传}`；`Idempotency-Key: {orderId}`（如有）
-- Query: 无 / `?a=b`
-- Body: `{ "userId": "{id}", "event": "USER_CREATED" }`
-- 源码取材: `NotificationClient.java:55-62`（DTO `NotificationRequest`）
+> 扣减库存，失败时订单置 FAILED。
 
-##### Response — Success
-- Status: `200`
-- Body: `{ "notificationId": "string", "sentAt": "iso8601" }`
-- 本地消费: 取 `notificationId` 记入订单流水（`OrderService.java:128`）
+**关键事实**
+- 超时未配置（默认无限等待）client/StockClient.java:58
+- 重试 2 次
+```
 
-##### Response — Failed
-| 场景 | 状态码 / 异常 | 本地行为 | 源码依据 |
+Inbound 例：
+
+```
+### I1. 同步 HTTP → POST /api/orders
+
+| 鉴权 | 主坐标 |
+|---|---|
+| JWT | controller/OrderController.java:31 |
+
+> 接单入口：校验 → 扣库存 → 落单，失败即整体回滚。
+
+**关键事实**
+- 请求体上限 1MB（413，与业务校验 400 分开归因）
+```
+
+构件规则：
+
+- **标题承载身份**：`### {编号}. {类型} → {目标}（{关键属性}）`；类型细分到协议/库（`DB → orders 表（Spring Data JPA）`、`子进程 → libreoffice 转换`）；标题已含的不再进表
+- **元信息表**：只收标题未覆盖的身份字段 0–2 个 + 主坐标（必有）；身份字段为 0 时**不建表**，主坐标单独一行（`主坐标：service/OrderService.java#execute`）。字段名短词，值枚举化、禁句子：
+
+| 字段 | 值域 |
+|---|---|
+| 鉴权 | JWT / Basic / API-Key / OAuth2 / mTLS / 无（可组合 `Basic+RBAC`） |
+| 限流 | 无 / `{N}次/秒` / 令牌桶 |
+| 触发 | 必经 / 条件（{条件}）/ 异步 / 周期（cron） |
+| 路由 / 表 / topic | 原生字面值，行内代码 |
+
+- **一句话摘要**（引用块）：只回答「它对外承诺什么结果」；可含 `→` 流程速写；分支细节留给失败表
+- **关键事实** ≤ 3 条：只收非默认、非显然、非推论且影响行为的（§一门槛表）；L2 风险坐标在此标注
+- **折叠区**（环境自适应：文件 / GFM 环境用 `<details><summary>{内容清单}</summary>…</details>`；终端用 `▸ {内容清单}` 标记行 + 一级缩进）：完整元信息（触发点 / 触发条件 / 幂等 / 保护机制数值按需）、处理逻辑详版、类型专属 schema（§四/§五）、失败表、源码片段——全部按需，无实质内容的小节不出现
+- **防御机制归属**：入站防御（文件名清洗、输入净化、请求体限制）只写在 I 卡 Request，出站卡只写操作本身——两处不复述同一边界行为
+
+### 处理逻辑（折叠区内；摘要已承载流程的简单卡整段省略）
+
+- ①②③ 编号，每步动词开头 ≤ 30 字，≤ 5 步——超出先合并为更高层意图（如九步编排并为「五个必经步 + 收尾组」）
+- 步骤之间不用箭头、禁「然后/随后/接着」，并列用分号；步内 O 编号链可用 `→`（如「管道 O2→O3→O4（短路）」）
+- 不展开下游内部，写「调用 O2 扣减库存」；控制流行内标注：`②（循环：逐商品 2N 次）`、`③（与 ② 并行）`、`④（条件：flag 开启时）`、`⑤（异步：不等结果）`
+- 全局控制流（短路 / 并行组 / 背压）写在 Outbounds 区块标题行的括注里，一次说清
+
+### 失败表（Outbound；折叠区内，两列）
+
+| 症状 | 处置 |
+|---|---|
+| 下游 5xx | 重试2次-降级 |
+| 插入唯一键冲突 | 致命-中止 |
+| 发送失败 | 忽略-记日志 |
+
+- 处置列只用枚举词：`致命-中止` / `降级-跳过` / `重试{N}次` / `忽略-记日志`；告警并入处置词（`致命-中止-告警`）；可带 ≤ 12 字去向括注（`（见 I1）`、`（轮询 ERROR）`、`（400）`）；禁止句子、禁止句号
+- 只收**代码真实存在的分支**；失败分支全为默认行为（如「异常即回滚」「冒泡中止」）时整段省略
+- 下游错误如何传导到 Inbound，一行「映射见 I1 错误映射」即可
+
+### 错误映射表（Inbound 特有；折叠区内）
+
+| 场景 | 来源 | 对外响应 | 泄漏 |
 |---|---|---|---|
-| 业务拒绝 | `409 {"code":"INSUFFICIENT"}` | 抛 `InventoryRejectedException` → 订单置 FAILED | `InventoryClient.java:70` |
-| 下游 5xx | `500 / 503` | 重试 2 次 → 降级「待确认」 | `InventoryClient.java:75-83` |
-| 连接 / 读超时 | `SocketTimeout {N}s` | 同 5xx，转异步补偿 | `InventoryClient.java:80` |
-| 反序列化失败 | `JsonParseException` | 按 5xx 处理 | `InventoryClient.java:84` |
+| 参数校验失败 | 本地校验 | `400 {"code":"INVALID_ARG"}` | 否 |
+| 库存不足（O1 传播） | 下游传播 | `409` | 否 |
+| 未捕获异常 | 未捕获 | `500` | 需确认-堆栈 |
 
-> 规则：Failed 表只收**代码真实存在的分支**，每行 `file:line`；代码未配置的分支写事实行（如「超时：未配置，默认无限等待」）。下游错误如何传导到 Inbound 错误映射表，在元信息表「失败处理」注明去向；熔断 / 重试参数写元信息表「保护与幂等」。
+- 来源四分类：本地校验 / 鉴权 / 下游传播 / 未捕获；泄漏列枚举：`否` / `是-堆栈` / `是-内部信息` / `需确认-堆栈`
+- 错误分支追到**发起翻译的那一层**（下游错误常在上游网关/frontend 被翻译成 422/500），分支写在翻译层；项目特有的非标准映射（如约束冲突 → 404）如实记录并加注，不按「应该 409」臆改
+- 鉴权有无看主路径表「鉴权」字段，不进表；平台级限制（413）与业务校验（400/422）分开归因
 
-### 3.2 Database
+### 符号规范（一个事实一种符号）
 
-四段必填：`Statement / 参数绑定与返回值 / 事务与隔离 / 失败处理`。SQL 一律**实证**，读写分开列条目。按访问方式取材：ORM（JPA/Hibernate…）写派生 SQL 并注明来源方法，对象查询语言（JPQL…）原样抄录附 SQL 对照；SQL 映射框架（MyBatis…）逐字抄录；原生驱动保留占位符原样（`?` / `$1` / `:param` / `%s`）。
+| 信息类型 | 唯一载体 |
+|---|---|
+| 摘要 | 引用块 `>` |
+| 结构化事实 | 表格 |
+| 顺序步骤 | 有序列表 ①②③ |
+| 枚举 / 约束 / 关键事实 | 无序列表，不加粗 |
+| 代码 / 路由 / schema 字面值 | 行内代码（多行进折叠区代码块） |
 
-##### Statement
-- 操作类型: INSERT
-- SQL:
+- 同一事实不跨载体重复；主路径加粗仅 `**关键事实**` 引导词一处，折叠区字段组加粗不限其数，强调靠位置而非字重
+- 标题层级 ≤ 3：`##` 区块 → `###` 卡片 → `**字段组**`（加粗代替四级标题）；折叠区内不升标题，用加粗字段组
+- 全篇无超过 3 行的无标题叙述段落
+
+### 多入口规则
+
+同一 handler 被多种方式触发（HTTP + MQ、API + 定时任务）→ 每个入口一张独立 I 卡片，共享同一 O 编号空间，各自只列自己链路实际触达的 O；同一方法多路由映射（`@PostMapping({"/a","/b"})`）→ 合并一张卡，路由字段列全部路由。
+
+## 三、代码块与坐标配额
+
+### 代码块
+
+1. **白名单**：块级引用只允许「字面值即事实」者——SQL、路由/URL、Header/配置键名、注解、MQ topic/消息类型名、C:/S: 报文交换图；且只进折叠区，每段 ≤ 5 行（超出裁剪到能证明结论的最小片段，`{…}` 压缩）。函数体、语句块、控制流、变量声明、类定义、方法签名一律禁止
+2. **行内**：标识符级引用（`orderService.deduct()`、`OrderStatus.FAILED`）是名词不是语句，可用；每卡 ≤ 5 处
+3. **主路径零代码块**——折叠区外一个代码块都没有，是最直观的验收标准
+
+代码在干什么 → 别贴代码，这样写：
+
+| 代码形态 | 写法 |
+|---|---|
+| 一串 if 校验 | 校验 A/B/C 三项必填，缺失返回 400 |
+| try-catch 包调用 | 失败捕获转 503（不重试） |
+| 循环处理列表 | 逐条处理 items，单条失败跳过并累计错误数 |
+| 构造请求对象 | 组装请求：orderId + items[] + 幂等键 |
+| 事务包裹 | `@Transactional` 包裹落库，异常回滚（OrderService.java:88） |
+
+判据：删掉这段代码，结论还成立吗？成立 → 删，换坐标或意图描述；不成立（字面值即结论）→ 保留并压到最小片段。
+
+### 坐标（三层 + 配额）
+
+| 层 | 用途 | 密度 | 位置 |
+|---|---|---|---|
+| L1 主坐标 | 本卡默认验证入口 | 每卡恰好 1 个 | 元信息表「主坐标」字段 |
+| L2 风险坐标 | 安全/并发/失败处理/隐式出站等高危结论 | 每卡 ≤ 2 个 | 关键事实条目内 |
+| L3 普通结论 | 其余全部 | 0 个 | 靠 L1 兜底 |
+
+- 合并：同文件相邻行 → `:88-93` 区间；同方法多处 → `OrderService#createOrder（多处）`；调用链只留最外层一跳
+- 路径压缩：报告开头声明一次相对前缀；正文短路径；文件名仓库内唯一时省目录。格式统一 `文件:行` / `文件:起-止` / `文件#方法`，禁 `L88`、`line 88`、`第88行`
+- 禁止坐标的位置：一句话摘要内、处理逻辑每步后、失败表与错误映射表行内、元信息表非主坐标字段、补充说明
+- 配额：每卡 ≤ 3 个（1 锚点 + 2 风险）；全报告 ≤ 卡片数 × 2；处理逻辑区坐标 = 0（折叠区源码片段除外）；坐标 + 行内代码每卡合计 ≤ 5 处（防跷跷板）
+- 判据：删掉这个坐标，读者还能通过主坐标找到吗？能 → 删；不能 → 检查能否并入区间
+
+## 四、Inbound 类型专属 schema（折叠区菜单，按需选取）
+
+### 4.1 HTTP / gRPC Server（同步服务入口）
+
+菜单：`Request（入参契约）/ Response — Success / 错误映射表`；契约定义位置由主坐标覆盖，contract-first 项目在关键事实注明 spec 来源（`operationId`）。
+
+**Request**
+- Method / Path: `POST /api/orders`（gRPC 写全限定 method `oteldemo.OrderService/CreateOrder` + request message）
+- 参数: Path `{orderId}`（string, 必填）；Query / Headers 按需
+- Body 模型: `CreateOrderRequest { skuId, qty }`——真实字段名实证；非 JSON（multipart / XML / 二进制流）按原生结构展示；序列化细节要核实（null 省略、camelCase/snake_case、包装信封）
+- 校验规则: `@NotNull skuId`、`qty >= 1`（按需，写非常规约束）
+- 异步受理形态: `202` + 轮询地址 / 回调，注明结果如何查询（有则必写——会猜错的行为）。错误映射按**通道分段**：受理时错误走 HTTP 状态码（映射表上半段），202 之后一切终态走轮询 body 的 `status` 字段（映射表下半段，同步端点的 4xx/5xx 语义在此转移）；轮询语义必写——进行中占位（如 SCANNING）、结果保留 TTL、淘汰后轮询的行为
+
+**Response — Success**
+- Status: `201`；Body 真实形态（`{ "orderId": "{uuid}", "status": "CREATED" }`）；写副作用指向 O 编号
+
+**错误映射表**：见 §二（列式、翻译层规则）。
+
+### 4.2 MQ Consumer（异步消费入口）
+
+菜单：`消息契约 / 消费语义 / 失败表`。
+
+- 消息契约: Topic / Queue `order.created`；消费组；Message Body 与 Headers；反序列化与 Schema 校验位置（主坐标覆盖）
+- 消费语义: 推 / 拉；并发度 `{N}`；顺序性（按 key 保序 / 无）；幂等（`messageId` 去重表 / 天然幂等 / 无——会猜错时必写）；重试与 DLQ 去向（毒消息的去向必写）
+- 失败表：两列枚举（§二）；业务异常 / 反序列化失败等真实分支
+
+### 4.3 定时任务 / CLI / 事件监听
+
+菜单：`触发定义 / 入参来源 / 主处理逻辑 / 失败表`。
+
+- 触发定义: cron `{...}` / 命令行 / 事件源；并发控制（单实例锁 / 允许并行——会猜错时必写）
+- 入参来源: 环境变量 / 命令行参数 / 事件体
+- 主处理逻辑: ①②③（引用 O 编号，规则见 §二）
+- 失败表：重试、告警、漏跑补偿（错过的周期如何补——会猜错时必写）
+
+## 五、Outbound 类型专属 schema（折叠区菜单，按需选取；12 类）
+
+### 5.1 下游 HTTP
+
+菜单：`Request / Response — Success / 失败表`；客户端库（RestClient / WebClient / axios / fetch…）写进标题关键属性或 Request 首行。
+
+**Request**
+- Method / Path: `POST ${NOTIFICATION_BASE_URL:-http://notify.internal}/api/v1/notifications`
+- Headers: `Authorization: Bearer {token 的来源：配置/令牌服务/请求透传}`；`Idempotency-Key: {orderId}`（如有）
+- Body: `{ "userId": "{id}", "event": "USER_CREATED" }`
+
+**Response — Success**：Status；Body；本地消费（取哪个字段做什么，指向 O 编号或 I1）。
+
+**失败表**：两列枚举（如 `下游 5xx | 重试2次-降级`；`连接/读超时 | 转异步补偿`）。
+
+### 5.2 Database
+
+菜单：`Statement / 参数绑定与返回值 / 事务与隔离 / 失败表`。SQL 一律**实证**，读写分开列条目。按访问方式取材：ORM（JPA/Hibernate…）写派生 SQL 并注明来源方法；对象查询语言（JPQL…）原样抄录附 SQL 对照；SQL 映射框架（MyBatis…）逐字抄录；原生驱动保留占位符原样（`?` / `$1` / `:param` / `%s`）。
+
+- Statement（代码块，折叠区）：
   ```sql
   INSERT INTO orders (user_id, amount, status, created_at)
-  VALUES (?, ?, ?, ?)        -- OrderRepository.save() 派生，时间戳由实体回调填充
+  VALUES (?, ?, ?, ?)     -- OrderRepository.save() 派生
   ```
-- 对象查询语言对照: `SELECT u FROM User u JOIN FETCH u.orders WHERE u.id = :id` → `SELECT … FROM users u JOIN orders o …`
+- 参数绑定与返回值: 入参绑定位置；返回 / 影响行数（回填主键、`==1` 校验）；分页与上限 clamp（按需）
+- 事务与隔离: 事务边界——无注解时写明实际承担者（如「`JpaRepository.save()` 方法级默认事务承担」，无注解 ≠ 无事务，会猜错必写）；回滚规则以源码实证（Spring 默认**不**回滚受检异常——勿想当然写「失败即回滚」）；隔离级别 / 锁 / 读写分离（按需）
+- 失败表：两列枚举（如 `DataIntegrityViolationException | 致命-中止（映射见 I1）`；`DeadlockLoser | 重试1次`）
 
-##### 参数绑定与返回值
-- 入参: `userId`, `amount`, `status`（绑定位置 `OrderRepository.save()`）
-- 返回 / 影响行数: IDENTITY 主键 persist 后回填；影响行数校验 `==1`，否则抛 `OptimisticLockException`
-- 分页: `LIMIT {n} OFFSET {m}`，上限 clamp `{max}` / 无分页
+### 5.3 缓存（Redis / Memcached / 本地缓存）
 
-##### 事务与隔离
-- 事务边界: `@Transactional`（`OrderService.java:60`）；无注解时写明实际承担者（如「框架方法级默认事务」）
-- 回滚规则: 以源码实证（Spring 默认**不**回滚受检异常——rollbackFor / 异常类型未经查证，勿写「失败即回滚」）
-- 隔离级别 / 锁: READ_COMMITTED / `SELECT … FOR UPDATE` / 默认（未显式设置）
-- 读写分离 / 从库路由: 无 / 有（注明路由条件）
+菜单：`Command / Value 结构 / TTL 与一致性 / 失败表`。命令用原文；本地缓存（Caffeine 等）以客户端 API 调用形态替代并标注「进程内」。
 
-##### 失败处理
-| 异常 | 本地行为 | 源码依据 |
-|---|---|---|
-| `DataIntegrityViolationException` | 唯一键冲突 → 400（映射位置 `ExceptionAdvice.java:41`，如实记录勿想当然） | `...:92` |
-| `DeadlockLoserDataAccessException` | 重试 1 次 | `...:95` |
+- Command（代码块，折叠区）:
+  ```redis
+  GET session:{userId}    → MISS: 回源 DB（O2），随后 SET session:{userId} {json} EX 1800
+  ```
+- Key 模式与前缀来源；Value 序列化与结构
+- TTL 与一致性: 更新策略（写后删除 / 双删 / 订阅 binlog）；穿透防护（空值缓存）
+- 失败表：如 `连接超时 | 降级-直查DB（O2）`
 
-### 3.3 缓存（Redis / Memcached / 本地缓存）
+### 5.4 消息队列（Producer）
 
-四段必填：`Command / Value 结构 / TTL 与一致性 / 失败处理`。命令用原文（Redis 命令序列）；本地缓存（Caffeine / Guava）无命令协议，以客户端 API 调用形态替代（如 `Cache.getIfPresent(key)`），并标注「进程内」。
+菜单：`消息定义 / 发送模式 / 可靠性 / 失败表`。Kafka 与 AMQP 各按原生格式。
 
-##### Command
-```redis
-GET session:{userId}          → 命中: 反序列化，TTL 剩余 {t}s
-                              → MISS: 回源 DB（O2），随后 SET session:{userId} {json} EX 1800
-```
-- Key 模式: `session:{userId}`，前缀来源 `CacheKeys.java:12`
+- 消息定义: `SEND topic=${KAFKA_TOPIC:-orders} key={orderId}`；payload 与序列化格式；key 分区语义（保序）；AMQP 写 `PUBLISH exchange={} routing-key={} mandatory=false` + props（`delivery_mode=2` 持久化）
+- 发送模式: 同步 / 异步生产者；事务消息 / 普通发送
+- 可靠性: 确认（`acks=all` / publisher confirm / `RequiredAcks=NoResponse`）与投递语义（at-least-once / at-most-once）——**必写，它决定下游对账方式**；失败兜底（本地重试 → 落表 `mq_outbox` 补偿 / 记 ERROR 丢弃）
+- 失败表：如 `Broker 不可达 | 降级-落outbox补偿`；`发送超时 | 忽略-记日志（at-most-once）`
 
-##### Value 结构
-- 序列化: JSON / JDK 序列化 / Protobuf；结构 `{ "userId": "{id}", "loginAt": "{ts}" }`
+> 消费侧调查属 Inbound（§4.2），不在此展开。
 
-##### TTL 与一致性
-- TTL: 1800s；更新策略: 写后删除 / 双删 / 订阅 binlog / 无失效
-- 淘汰 / 容量: 本地缓存（Caffeine 等）标注「进程内」并写容量与 TTL
+### 5.5 gRPC（下游调用）
 
-##### 失败处理
-| 场景 | 本地行为 | 源码依据 |
-|---|---|---|
-| 连接超时 | 降级直查 DB（O2） | `...:66` |
-| 缓存穿透 | 空值缓存 60s | `...:70` |
+菜单：`Method 与 Message / Deadline / 状态码处置 / 失败表`。
 
-### 3.4 消息队列（Producer）
+- Method 与 Message: `CALL risk.v1.RiskService/CheckOrder`（同步 / 异步 stub，addr=`${RISK_ADDR}`）；request / response 字段示意
+- Deadline: `{N}ms` / **未显式设置**（gRPC 默认无限等待——超时保护缺失本身就是值得记录的事实，写关键事实）
+- 状态码处置: `UNAVAILABLE → 按降级策略放行 / 直接失败`（与 HTTP 下游的区别：错误模型是 status code）
+- 失败表：如 `DEADLINE_EXCEEDED | 降级-放行`
 
-四段必填：`消息定义 / 发送模式 / 可靠性 / 失败处理`。Kafka 与 AMQP 各按原生格式。
+### 5.6 对象存储（S3 / OSS / MinIO / GCS）
 
-##### 消息定义
-- Kafka: `SEND topic=${KAFKA_TOPIC:-orders} key={orderId}`；payload `{ "eventType": "ORDER_CREATED", "orderId": "{id}" }`（序列化格式注明 protobuf / JSON）；key 分区语义（保序）
-- AMQP: `PUBLISH exchange={orders.x} routing-key={order.created} mandatory=false`；`props: content_type=application/json, delivery_mode=2（持久化）`
-- Headers: `traceId`、`schemaVersion`
+菜单：`操作与路径 / 请求头与元数据 / 凭证与 SDK 行为 / 失败表`。
 
-##### 发送模式
-- 同步 / 异步生产者；事务消息 / 普通发送
+- `PUTObject bucket={bucket} key={prefix}/{yyyyMM}/{uuid}.zip`（SDK 写标题关键属性）
+- 头与元数据: `Content-MD5`、`StorageClass`（按需）
+- 凭证: 实例角色 / 环境变量 / 配置（只写来源，不写值）；SDK 内建重试次数（按需）
+- 失败表: 如 `上传失败 | 降级-保留本地临时文件-告警`
 
-##### 可靠性
-- 确认: `acks=all` / publisher confirm / `RequiredAcks=NoResponse`；投递语义 at-least-once / at-most-once（如实写，它决定下游对账方式）
-- 失败兜底: 本地重试 {N} 次 → 失败落表 `mq_outbox` 后台补偿 / 记 ERROR 丢弃
+### 5.7 SFTP / FTP
 
-##### 失败处理
-| 场景 | 本地行为 | 源码依据 |
-|---|---|---|
-| Broker 不可达 | 写入 outbox，后台补偿 | `...:88` |
-| 发送超时 | 记 ERROR 丢弃（at-most-once） | `...:92` |
+菜单：`会话与认证 / 传输操作 / 触发与时机 / 失败表`。操作用命令序列原文（代码块，折叠区）。
 
-> **消费侧**调查属 Inbound（§2.2），不在此展开。
+- 会话: `CONNECT {sftp.host}:{22}`，auth 方式；连接复用/池化；**known_hosts 校验有无**（会猜错必写——缺失即中间人风险）
+- 传输操作:
+  ```sftp
+  CD /outbound/reports
+  PUT {localTmpPath} → {yyyyMM}/report-{orderId}.csv   (overwrite=false)
+  ```
+- 触发与时机: 主链路必经 / 对账批处理（每日 cron）；目录不存在时的行为
+- 失败表: 如 `PUT 失败 | 致命-中止-清理临时文件`
 
-### 3.5 gRPC（下游调用）
+### 5.8 自定义 TCP / UDP
 
-四段必填：`Method 与 Message / Deadline / 状态码处置 / 失败处理`。
+菜单：`帧格式与会话 / 连接与超时 / 粘包与分包 / 失败表`。会话用 C:/S: 报文交换图原文——二进制协议最有表达力的形态（代码块，折叠区）。
 
-##### Method 与 Message
-- `CALL risk.v1.RiskService/CheckOrder`（{同步 stub / 异步 stub}，addr=${RISK_ADDR}）
-- request: `{ orderId: "{id}", amount: {amount} }`（protobuf 字段示意）
-- response: `{ decision: PASS|BLOCK, reason: "{…}" }`
-
-##### Deadline
-- `{N}ms` / 未显式设置（写明——gRPC 默认无限等待，超时保护缺失本身就是值得记录的事实）
-
-##### 状态码处置
-- `UNAVAILABLE → {按降级策略放行 / 直接失败}`；与 HTTP 下游的区别：错误模型是 status code 而非 HTTP 状态码
-
-##### 失败处理
-| 状态码 / 异常 | 本地行为 | 源码依据 |
-|---|---|---|
-| `DEADLINE_EXCEEDED` | 按「下游不可用」降级 | `...:70` |
-
-### 3.6 对象存储（S3 / OSS / MinIO / GCS）
-
-四段必填：`操作与路径 / 请求头与元数据 / 凭证与 SDK 行为 / 失败处理`。
-
-##### 操作与路径
-- `PUTObject bucket={bucket} key={prefix}/{yyyyMM}/{uuid}.zip`（{SDK}）
-
-##### 请求头与元数据
-- `Content-MD5={md5}`、`StorageClass=STANDARD_IA`
-
-##### 凭证与 SDK 行为
-- 凭证: {实例角色 / 环境变量 / 配置}（只写来源，不写值）
-- SDK 内建重试: 5xx 重试 {N} 次 / 无
-
-##### 失败处理
-| 场景 | 本地行为 | 源码依据 |
-|---|---|---|
-| 上传失败 | 保留本地临时文件 + 告警人工处理 | `...:77` |
-
-### 3.7 SFTP / FTP
-
-四段必填：`会话与认证 / 传输操作 / 触发与时机 / 失败处理`。操作用命令序列原文。
-
-##### 会话与认证
-- `CONNECT {sftp.host}:{22}`，auth={用户名密码 / 密钥}；连接复用/池化 {max}；known_hosts 校验 {有 / 无}
-
-##### 传输操作
-```sftp
-CD    /outbound/reports
-PUT   {localTmpPath} → {yyyyMM}/report-{orderId}.csv   (overwrite=false)
-LS    {yyyyMM}/report-{orderId}.csv                    ← 确认落盘
-DISCONNECT
-```
-
-##### 触发与时机
-- 主链路必经 / 对账批处理（每日 {cron}）；目录不存在时 {mkdir -p / 失败}
-
-##### 失败处理
-| 场景 | 本地行为 | 源码依据 |
-|---|---|---|
-| PUT 失败 | 删除本地临时文件 → 500 | `...:90` |
-
-### 3.8 自定义 TCP / UDP
-
-四段必填：`帧格式与会话 / 连接与超时 / 粘包与分包 / 失败处理`。会话用 C:/S: 报文交换图原文——它是二进制协议最有表达力的形态。
-
-##### 帧格式与会话
 ```text
 C: <2-byte BE 长度>{JSON 请求体}
 S: <2-byte BE 长度>{"code": 0, "risk": "LOW"}
 S: <断开>                                ← 超时语义
 ```
 
-##### 连接与超时
-- `TCP {host}:{port}`；超时 {N}s / 客户端库不含 socket 超时（如实写明——它决定超时保护必须在应用层实现）
+- 连接与超时: `TCP {host}:{port}`；超时 `{N}s` / **客户端库不含 socket 超时**（会猜错必写——超时保护必须在应用层实现）
+- 粘包与分包: 长度前缀 `{4-byte big-endian}` / `\0` 结尾 / 无（裸流）
+- 失败表: 如 `连接拒绝 | 熔断{N}s-重试`
 
-##### 粘包与分包
-- 长度前缀 {4-byte big-endian} / `\0` 结尾 / 无（裸流）
+### 5.9 子进程 / CLI
 
-##### 失败处理
-| 场景 | 本地行为 | 源码依据 |
-|---|---|---|
-| 连接拒绝 | 熔断 {N}s 后重试 | `...:58` |
+菜单：`命令行与参数 / 输入与环境 / 输出解析与退出码 / 失败表`。
 
-### 3.9 子进程 / CLI
+- 命令行: `$ libreoffice --headless --convert-to pdf --outdir {outDir} {inputFile}`（参数含义注明；代码块，折叠区）
+- 输入与环境: stdin；环境变量继承（全继承 / 白名单）；工作目录
+- 输出解析与退出码: stdout 提取规则；退出码映射（工具退出码 ≠ 业务结果时写明）
+- 失败表: 如 `超时 {N}s | 致命-强杀进程树`（孤儿子进程注意点按需注明）
 
-四段必填：`命令行与参数 / 输入与环境 / 输出解析与退出码 / 失败处理`。
+### 5.10 文件系统
 
-##### 命令行与参数
-- `$ libreoffice --headless --convert-to pdf --outdir {outDir} {inputFile}`（每个参数含义注明）
+菜单：`路径与权限 / 写入模式 / 操作序列 / 失败表与清理责任`。操作用动词 + 路径模板原文（代码块，折叠区）。
 
-##### 输入与环境
-- stdin: 无 / {内容}；环境变量继承: {全继承 / 白名单}；工作目录: {dir}
-
-##### 输出解析与退出码
-- stdout 解析规则: `"convert … -> {outPath}"` 提取产物路径
-- 退出码: 0 = 成功；非 0 = 转换失败（工具退出码 ≠ 业务结果时写明映射）
-
-##### 失败处理
-| 场景 | 本地行为 | 源码依据 |
-|---|---|---|
-| 超时 {N}s | 强杀进程树（kill -9 / destroyForcibly，注意孤儿子进程） | `...:45` |
-
-### 3.10 文件系统
-
-四段必填：`路径与权限 / 写入模式 / 操作序列 / 失败处理与清理责任`。操作用动词 + 路径模板原文。
-
-##### 路径与权限
-- `{workDir}/{batchId}.csv`；来源 {配置键 / 环境变量}；目录权限 {0700}
-
-##### 写入模式
-- 覆盖 / 追加 / 临时文件 + rename（原子性）
-
-##### 操作序列
 ```text
-write  {workDir}/{batchId}.csv                          ← 批处理结果写出
-move   {workDir}/{batchId}.csv → {archiveDir}/{yyyyMM}/ ← 成功归档（跨文件系统失败降级 copy+delete）
-move   {workDir}/{batchId}.csv → {failedDir}/{batchId}.failed   ← 失败归档
-delete {workDir}/{batchId}.csv                          ← 收尾清理（无论分流去向）
+write  {workDir}/{batchId}.csv                ← 结果写出
+move   {workDir}/{batchId}.csv → {archiveDir}/ ← 成功归档（跨文件系统失败降级 copy+delete）
+delete {workDir}/{batchId}.csv                 ← 收尾清理
 ```
 
-##### 失败处理与清理责任
-| 场景 | 本地行为 | 源码依据 |
-|---|---|---|
-| move 失败 | 降级 copy+delete；仍失败告警 | `...:120` |
+- 路径与权限: 路径模板与配置来源；目录权限（按需）
+- 写入模式: 覆盖 / 追加 / 临时文件 + rename（原子性——有则写）
+- 失败表: 失败归档去向、清理责任（谁删临时文件——会猜错必写）
 
-### 3.11 SMTP
+### 5.11 SMTP
 
-四段必填：`会话与认证 / 收件人与模板 / 发送模式 / 失败处理`。
+菜单：`会话与认证 / 收件人与模板 / 发送模式 / 失败表`。
 
-##### 会话与认证
-- `SMTP {host}:{port}`，{STARTTLS / 明文}，auth={凭证来源}
+- 会话: `SMTP {host}:{port}`，STARTTLS / 明文（明文必写）；auth 凭证来源
+- 收件人与模板: FROM / TO / 抄送；SUBJECT / BODY 模板来源与 `{占位符}`
+- 发送模式: 同步（阻塞主链路）/ 异步任务 / 队列——**是否阻塞主链路必写**
+- 失败表: 如 `发送失败 | 忽略-记日志（异步任务内已捕获）`
 
-##### 收件人与模板
-- `FROM {from} TO {to}`（抄送/密送如有）；SUBJECT: `[{环境}] {告警标题}`；BODY 模板来源 + `{占位符}` 动态字段
+### 5.12 进程内重计算（重量级库）
 
-##### 发送模式
-- 同步 / 异步任务 / 队列
-
-##### 失败处理
-| 场景 | 本地行为 | 源码依据 |
-|---|---|---|
-| 发送失败 | 记 WARN 不重试（异步任务内已捕获，不影响主流程） | `...:33` |
-
-### 3.12 进程内重计算（重量级库）
-
-不算出站系统，为保序完整仍编号，**不套四段**，两行说清 + 末尾标注：
+不算出站系统，为保序完整仍编号，**不套四段菜单**，主路径两行说清 + 末尾标注：
 
 - `O5. 进程内（{解析库}）→ 报文结构校验，无外部系统`
-- 操作: parse {payload 来源}；按内容分流: schema 校验 / 逐节点解析 / 大报文分块扫描
+- 关键事实（按需）: 按内容分流（schema 校验 / 逐节点解析 / 大报文分块扫描）
 
-***
+## 六、速查表
 
-## 四、Schema 速查表
-
-| 类型 | 必填小节 | 关键必写项 |
+| 类型 | 折叠区小节菜单 | 常见「会猜错的无」必查 |
 |---|---|---|
-| Inbound: HTTP / gRPC Server | Request / Success / Failed 错误映射表 | 契约定义位置、校验规则、错误来源四分类、映射位置 |
-| Inbound: MQ Consumer | 消息契约 / 消费语义 / 失败处理 | 反序列化位置、幂等、DLQ 去向 |
-| Inbound: 定时 / CLI / 事件 | 触发定义 / 入参来源 / 主处理逻辑 / 失败处理 | 并发控制、漏跑补偿 |
-| Outbound: 下游 HTTP | Request / Success / Failed 表 | 配置键、认证头、超时、错误分支 |
-| Outbound: Database | Statement / 参数绑定 / 事务隔离 / 失败处理 | SQL 实证、占位符、事务边界、约束冲突路径 |
-| Outbound: 缓存 | Command / Value 结构 / TTL 一致性 / 失败处理 | key 模式、TTL、miss 回源 |
-| Outbound: MQ Producer | 消息定义 / 发送模式 / 可靠性 / 失败处理 | topic/exchange、序列化、投递语义 |
-| Outbound: gRPC | Method 与 Message / Deadline / 状态码处置 / 失败处理 | 全限定名、deadline、状态码处置 |
-| Outbound: 对象存储 | 操作与路径 / 头与元数据 / 凭证与 SDK / 失败处理 | bucket/key、凭证来源、SDK 重试 |
-| Outbound: SFTP / FTP | 会话与认证 / 传输操作 / 触发时机 / 失败处理 | 路径模板、失败清理 |
-| Outbound: 自定义 TCP/UDP | 帧格式与会话 / 连接超时 / 粘包分包 / 失败处理 | C:/S: 交换图、库能力缺陷 |
-| Outbound: 子进程 | 命令行 / 输入环境 / 输出与退出码 / 失败处理 | 参数语义、stdout 解析、超时强杀 |
-| Outbound: 文件系统 | 路径权限 / 写入模式 / 操作序列 / 失败清理 | 配置来源、降级链、清理责任 |
-| Outbound: SMTP | 会话认证 / 收件人与模板 / 发送模式 / 失败处理 | 模板来源、是否影响主链路 |
-| Outbound: 进程内 | 轻量两行 + 「无外部系统」标注 | 分流逻辑 |
+| Inbound: HTTP / gRPC | Request / Success / 错误映射 | 请求体上限（413）、异步受理 202、幂等 |
+| Inbound: MQ Consumer | 消息契约 / 消费语义 / 失败表 | 幂等去重、DLQ 去向、顺序性 |
+| Inbound: 定时 / CLI / 事件 | 触发定义 / 入参来源 / 逻辑 / 失败表 | 并发控制、漏跑补偿 |
+| Outbound: 下游 HTTP | Request / Success / 失败表 | 超时未配置、重试、幂等键 |
+| Outbound: Database | Statement / 参数绑定 / 事务 / 失败表 | 事务承担者（无注解 ≠ 无事务）、回滚规则（受检异常） |
+| Outbound: 缓存 | Command / Value / TTL 一致性 / 失败表 | miss 回源、穿透防护 |
+| Outbound: MQ Producer | 消息定义 / 发送模式 / 可靠性 / 失败表 | 投递语义（acks）、失败兜底 |
+| Outbound: gRPC | Method / Deadline / 状态码处置 / 失败表 | deadline 未设置 |
+| Outbound: 对象存储 | 操作路径 / 头 / 凭证 / 失败表 | SDK 内建重试 |
+| Outbound: SFTP / FTP | 会话认证 / 传输 / 时机 / 失败表 | known_hosts 校验 |
+| Outbound: 自定义 TCP/UDP | 帧格式 / 连接超时 / 粘包 / 失败表 | 客户端库无 socket 超时 |
+| Outbound: 子进程 | 命令行 / 输入环境 / 退出码 / 失败表 | 超时强杀、孤儿进程 |
+| Outbound: 文件系统 | 路径权限 / 写入模式 / 操作序列 / 失败清理 | 原子性（tmp+rename）、清理责任 |
+| Outbound: SMTP | 会话认证 / 收件模板 / 发送模式 / 失败表 | 是否阻塞主链路、明文传输 |
+| Outbound: 进程内 | 两行卡 + 「无外部系统」标注 | — |
