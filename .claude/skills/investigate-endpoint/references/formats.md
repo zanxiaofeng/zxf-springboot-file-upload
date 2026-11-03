@@ -126,7 +126,7 @@ Inbound 例：
 
 ### 代码块
 
-1. **白名单**：块级引用只允许「字面值即事实」者——SQL、路由/URL、Header/配置键名、注解、MQ topic/消息类型名、C:/S: 报文交换图；且只进折叠区，每段 ≤ 5 行（超出裁剪到能证明结论的最小片段，`{…}` 压缩）。函数体、语句块、控制流、变量声明、类定义、方法签名一律禁止
+1. **白名单**：块级引用只允许「字面值即事实」者——SQL、**请求/响应报文（真实字段实证的数据结构，数据流动核心）**、路由/URL、Header/配置键名、注解、MQ topic/消息类型名、C:/S: 报文交换图；且只进折叠区，每段 ≤ 5 行（超出裁剪到能证明结论的最小片段，`{…}` 压缩）。函数体、语句块、控制流、变量声明、类定义、方法签名一律禁止
 2. **行内**：标识符级引用（`orderService.deduct()`、`OrderStatus.FAILED`）是名词不是语句，可用；每卡 ≤ 5 处
 3. **主路径零代码块**——折叠区外一个代码块都没有，是最直观的验收标准
 
@@ -150,7 +150,7 @@ Inbound 例：
 | L2 风险坐标 | 安全/并发/失败处理/隐式出站等高危结论 | 每卡 ≤ 2 个 | 关键事实条目内 |
 | L3 普通结论 | 其余全部 | 0 个 | 靠 L1 兜底 |
 
-- 合并：同文件相邻行 → `:88-93` 区间；同方法多处 → `OrderService#createOrder（多处）`；调用链只留最外层一跳
+- 合并：同文件相邻行 → `:88-93` 区间；同方法多处 → `OrderService#createOrder（多处）`；调用链只留最外层一跳；整文件级（一个文件一个 handler 的路由文件等）可裸文件
 - 路径压缩：报告开头声明一次相对前缀；正文短路径；文件名仓库内唯一时省目录。格式统一 `文件:行` / `文件:起-止` / `文件#方法`，禁 `L88`、`line 88`、`第88行`
 - 禁止坐标的位置：一句话摘要内、处理逻辑每步后、失败表与错误映射表行内、元信息表非主坐标字段、补充说明
 - 配额：每卡 ≤ 3 个（1 锚点 + 2 风险）；全报告 ≤ 卡片数 × 2；处理逻辑区坐标 = 0（折叠区源码片段除外）；坐标 + 行内代码每卡合计 ≤ 5 处（防跷跷板）
@@ -165,12 +165,12 @@ Inbound 例：
 **Request**
 - Method / Path: `POST /api/orders`（gRPC 写全限定 method `oteldemo.OrderService/CreateOrder` + request message）
 - 参数: Path `{orderId}`（string, 必填）；Query / Headers 按需
-- Body 模型: `CreateOrderRequest { skuId, qty }`——真实字段名实证；非 JSON（multipart / XML / 二进制流）按原生结构展示；序列化细节要核实（null 省略、camelCase/snake_case、包装信封）
-- 校验规则: `@NotNull skuId`、`qty >= 1`（按需，写非常规约束）
+- **Body（数据承载，数据流动的核心——完整实证）**: 真实字段名 + 真实结构，动态值 `{占位符}`——`{ "skuId": "{…}", "qty": {n} }`；关键字段可缀来源标注（`orderId ← I1 入参` / `← O2 响应`）；非 JSON 载体按原生形态（multipart 各 part / XML / 二进制流说明）；序列化细节核实（null 省略、camelCase/snake_case、包装信封）
+- Schema 校验（与 Body 分开表达，勿混为一谈）: 机制一句话——Bean Validation / OpenAPI 运行时校验 / Schema Registry / 无（「无校验」属会猜错的无，必写）；schema 整体引用（Bean 类 / schema 文件 / `.proto` message / registry subject）；**单个字段的 check 默认不写**——仅当该字段的判定影响关键处理流程（决定路由 / 分支 / 短路 / 处置去向）时才写，写成流程事实（如「type=officedocument → 进 O5 文档分支」）而非校验清单；范围只限 Inbound 请求侧，出站 payload 校验（O 卡）不调查不输出
 - 异步受理形态: `202` + 轮询地址 / 回调，注明结果如何查询（有则必写——会猜错的行为）。错误映射按**通道分段**：受理时错误走 HTTP 状态码（映射表上半段），202 之后一切终态走轮询 body 的 `status` 字段（映射表下半段，同步端点的 4xx/5xx 语义在此转移）；轮询语义必写——进行中占位（如 SCANNING）、结果保留 TTL、淘汰后轮询的行为
 
 **Response — Success**
-- Status: `201`；Body 真实形态（`{ "orderId": "{uuid}", "status": "CREATED" }`）；写副作用指向 O 编号
+- Status: `201`；Body 真实形态（`{ "orderId": "{uuid}", "status": "CREATED" }`，与 Request Body 同规格实证——数据流动的核心）；关键字段来源映射（`orderId ← O5 transactionId`）；写副作用指向 O 编号
 
 **错误映射表**：见 §二（列式、翻译层规则）。
 
@@ -178,7 +178,7 @@ Inbound 例：
 
 菜单：`消息契约 / 消费语义 / 失败表`。
 
-- 消息契约: Topic / Queue `order.created`；消费组；Message Body 与 Headers；反序列化与 Schema 校验位置（主坐标覆盖）
+- 消息契约: Topic / Queue `order.created`；消费组；**Message Body（数据承载）真实结构实证** + Headers（有业务意义的）；Schema 校验另列——机制一句话（registry 兼容性校验 / 本地校验 / 无），schema 整体引用（`.avsc` / `.proto` / registry subject / Bean 类），字段级约束不展开
 - 消费语义: 推 / 拉；并发度 `{N}`；顺序性（按 key 保序 / 无）；幂等（`messageId` 去重表 / 天然幂等 / 无——会猜错时必写）；重试与 DLQ 去向（毒消息的去向必写）
 - 失败表：两列枚举（§二）；业务异常 / 反序列化失败等真实分支
 
@@ -192,6 +192,8 @@ Inbound 例：
 - 失败表：重试、告警、漏跑补偿（错过的周期如何补——会猜错时必写）
 
 ## 五、Outbound 类型专属 schema（折叠区菜单，按需选取；12 类）
+
+数据映射与 Body 同为第一优先级：Request 的关键字段缀来源（`← I1 入参` / `← O2 响应`），Response 的消费字段写去向（本地消费做什么、`→` 流向哪个卡片或步骤）。
 
 ### 5.1 下游 HTTP
 
@@ -330,7 +332,7 @@ delete {workDir}/{batchId}.csv                 ← 收尾清理
 
 | 类型 | 折叠区小节菜单 | 常见「会猜错的无」必查 |
 |---|---|---|
-| Inbound: HTTP / gRPC | Request / Success / 错误映射 | 请求体上限（413）、异步受理 202、幂等 |
+| Inbound: HTTP / gRPC | Request / Success / 错误映射 | 请求体上限（413）、异步受理 202、幂等、无 schema 校验 |
 | Inbound: MQ Consumer | 消息契约 / 消费语义 / 失败表 | 幂等去重、DLQ 去向、顺序性 |
 | Inbound: 定时 / CLI / 事件 | 触发定义 / 入参来源 / 逻辑 / 失败表 | 并发控制、漏跑补偿 |
 | Outbound: 下游 HTTP | Request / Success / 失败表 | 超时未配置、重试、幂等键 |

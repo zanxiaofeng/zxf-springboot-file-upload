@@ -9,7 +9,7 @@
 
 ***
 
-## 先看反面：四类不合格样例
+## 先看反面：五类不合格样例
 
 > ❌ **散文化**：系统接收下单请求，参数有 skuId 和数量，会校验参数，没登录会返回 401，库存不够返回 409，下游挂了返回 503。——无卡片、无表格、无坐标，无法逐条审阅，也无法核实。
 
@@ -18,6 +18,8 @@
 > ❌ **空壳填表**：幂等设计「未实现」、重试策略「无」、错误映射「无特殊」——各占 2–3 行的信息量为零段落。正确做法是整段不出现（formats.md §一省略三档）。
 
 > ❌ **证据泛滥**：主路径贴函数体源码、处理逻辑每步尾随 `file:line`、「无超时」在每个 O 卡重复一遍——结论被证据淹没。正确做法：每卡 1 个主坐标 + ≤ 2 个风险坐标，共性（「O1–O8 均无超时」）上提 Summary 写一次。
+
+> ❌ **数据盲区**：卡片齐全、控制流清晰，但 Request / Response Body 只写「JSON body」「含订单信息」一笔带过，无真实字段、无流向标注——数据流动是报告第一位，Body 缺实证即不合格。
 
 ***
 
@@ -56,12 +58,14 @@
 ④ 扣款（O5，条件：flag `paymentUnreachable` 开启时连坏地址——demo 故障注入）
 ⑤ 发货（O6）；收尾：清购物车（O7，失败静默）；邮件（O8，失败告警）；发事件（O9，异步）
 
-**Request**（protobuf JSON 示意，已裁剪）
+**Request**
+- Body（数据承载）: `PlaceOrderRequest`（protobuf，schema 定义在 `demo.proto`）——真实字段 JSON 示意：
 ```json
 { "userId": "{id}", "userCurrency": "{code}", "email": "{email}",
   "address": { "streetAddress": "{…}", "city": "{…}", "…": "{…}" },
   "creditCard": { "number": "{…}", "expirationMonth": "{m}", "expirationYear": "{y}", "cvv": "{…}" } }
 ```
+- Schema 校验: 无应用层校验（protobuf 解析失败即 gRPC error）
 
 **Response — Success**：`OK`（frontend → HTTP 200）；`{ order: { orderId, shippingTrackingId, items[], shippingCost, total } }`
 
@@ -279,9 +283,9 @@ Spring 官方 sample，典型三层单体（Controller → Service → Spring Da
 
 <details><summary>Request / Response / 错误映射</summary>
 
-**Request**（OwnerFields，`openapi.yml`）
-- Body: `{ "firstName", "lastName", "address", "city", "telephone" }`（真实字段名实证）
-- 校验（openapi.yml → 生成的 Bean Validation）：firstName / lastName 长 1–30 + 人名 pattern（`-`、空格、`.`）；address ≤255；city ≤80；telephone pattern
+**Request**
+- Body（数据承载）: `{ "firstName", "lastName", "address", "city", "telephone" }`（真实字段实证）
+- Schema 校验: OpenAPI 契约 → openapi-generator 生成 Bean Validation（机制整体引用，约束清单不展开）
 
 **Response — Success**：`201`；`Location: /api/owners/{id}`（IDENTITY 主键回填，见 O1）；body `{ id, firstName, … }`
 
@@ -313,7 +317,7 @@ INSERT INTO owners (first_name, last_name, address, city, telephone)
 VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.save()（JPA persist）派生
 ```
 
-- 入参：Owner 实体五字段（`model/Owner.java`，@Table owners）；返回：IDENTITY 主键回填 `id`，用于 201 的 Location 与 body
+- 入参：Owner 实体五字段（`model/Owner.java`，@Table owners）；映射：persist 回填 `id` → I1 的 `Location` 头与 body（数据流向标注）
 - 附注（不在本链路）：后续读路径参考 getOwner 的 `SELECT … FROM owners WHERE id = ?`
 
 **失败表**
@@ -334,5 +338,5 @@ VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.sa
 | 控制流标注 | O2 循环 2N 次、O5 feature flag、O9 条件跳过 + 异步 | 无 |
 | 容错分级 | 致命 / 静默 / 告警 / 异步四档（失败表处置枚举） | 失败即中止（失败表单行） |
 | 共性风险上提 | 「O1–O8 均无超时」只在 Summary 出现一次 | 404 特有映射（Summary 一句 + 错误映射行内加注） |
-| 折叠区示范 | 9 步编排合并为 5 步 + Request/Response 裁剪 | 框架默认事务（会猜错的无）+ SQL 实证 |
+| 折叠区示范 | 9 步编排合并为 5 步 + Body 数据实证与 Schema 校验分离 | 框架默认事务（会猜错的无）+ SQL 实证 + Body/schema 分离（openapi.yml） |
 | 特有教学点 | 错误跨层传播（422 由 frontend 翻译）；下游的下游不展开 | contract-first 入口定位；如实记录 404 而非臆改 409 |
