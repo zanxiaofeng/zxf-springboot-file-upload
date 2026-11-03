@@ -5,7 +5,7 @@
 > - **案例 A · 分布式形态** — [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo)（CNCF 官方 demo）：电商下单链路，gRPC × 4、HTTP 下游 × 3、Kafka × 1，展示循环调用、容错分级、错误跨层传播、共性风险上提 Summary
 > - **案例 B · 单体 CRUD 形态** — [Spring Petclinic REST](https://github.com/spring-petclinic/spring-petclinic-rest)（Spring 官方 sample）：典型 REST + JPA，覆盖 SQL 出站、认证/校验错误映射、contract-first 入口定位
 >
-> 新调查对齐此密度即可；模板、字段规范与配额见 `formats.md`。范例内嵌报告标题降一级展示（区块 `###`、卡片 `####`），独立报告中应为 `##` / `###`；折叠区形态环境自适应——本文件按 GFM 环境用 `<details>`（GitHub 等查看器中折叠），终端输出改用 `▸` 标记行 + 缩进。
+> 新调查对齐此密度即可；模板、字段规范与配额见 `formats.md`。范例内嵌报告标题降一级展示（区块 `###`、卡片 `####`），独立报告中应为 `##` / `###`；折叠区形态环境自适应——本文件按 GFM 环境用 `<details>`（GitHub 等查看器中折叠），终端输出改用 `▸` 标记行 + 2 空格缩进（表格与代码块顶格）。
 
 ***
 

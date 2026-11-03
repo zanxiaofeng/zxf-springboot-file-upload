@@ -52,7 +52,7 @@ description: Investigate a web API endpoint's full execution path and produce a 
 3. **一句话摘要**（引用块）：只回答「它对外承诺什么结果」，可含 `→` 流程速写（`校验 → 扣库存 → 落单`），不展开分支细节
 4. **关键事实** ≤ 3 条：只收「读者猜不到、且影响行为」的内容（超时未配置、非标准错误码、幂等键缺失、异步旁路、feature flag 条件执行…）；L2 风险坐标在此标注
 
-**折叠区**（环境自适应：输出到文件 / GFM 环境用 `<details><summary>{内容清单}</summary>…</details>`；输出到终端用 `▸ {内容清单}` 标记行 + 一级缩进代替）：完整元信息（触发条件/幂等/保护机制按需）、处理逻辑详版、类型专属 schema（Request/Response、SQL、报文…）、失败表、源码片段——全部按需，无实质内容的小节不出现。菜单见 `references/formats.md`。
+**折叠区**（环境自适应：输出到文件 / GFM 环境用 `<details><summary>{内容清单}</summary>…</details>`；输出到终端用 `▸ {内容清单}` 标记行 + 一级缩进代替——正文行缩进 2 空格，表格与代码块顶格不缩进（保 GFM 渲染兼容），`▸` 行即折叠区边界）：完整元信息（触发条件/幂等/保护机制按需）、处理逻辑详版、类型专属 schema（Request/Response、SQL、报文…）、失败表、源码片段——全部按需，无实质内容的小节不出现。菜单见 `references/formats.md`。
 
 ## 密度与证据配额（硬上限，细则见 formats.md §二/§三）
 
