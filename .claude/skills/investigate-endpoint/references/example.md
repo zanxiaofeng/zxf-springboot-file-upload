@@ -1,9 +1,10 @@
-# 范例：不合格反例 + 两份真实开源项目的新格式调查报告
+# 范例：不合格反例 + 三份调查报告（真实开源 ×2 + 本仓库 ×1）
 
 > 案例选自两个公开项目（Apache-2.0，代码事实于 2026-10 按 main/master 分支核实）：
 >
 > - **案例 A · 分布式形态** — [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo)（CNCF 官方 demo）：电商下单链路，gRPC × 4、HTTP 下游 × 3、Kafka × 1，展示循环调用、容错分级、错误跨层传播、共性风险上提 Summary
 > - **案例 B · 单体 CRUD 形态** — [Spring Petclinic REST](https://github.com/spring-petclinic/spring-petclinic-rest)（Spring 官方 sample）：典型 REST + JPA，覆盖 SQL 出站、认证/校验错误映射、contract-first 入口定位
+> - **案例 C · 异步受理形态** — 本仓库（zxf-springboot-file-upload）：202 受理 + 轮询 + 四阶段扫描管道，覆盖错误通道分段、轮询语义（SCANNING 占位 / TTL 淘汰）、管道短路链标注、文件系统与进程内出站
 >
 > 新调查对齐此密度即可；模板、字段规范与配额见 `formats.md`。范例内嵌报告标题降一级展示（区块 `###`、卡片 `####`），独立报告中应为 `##` / `###`；折叠区形态环境自适应——本文件按 GFM 环境用 `<details>`（GitHub 等查看器中折叠），终端输出改用 `▸` 标记行 + 2 空格缩进（表格与代码块顶格）。
 
@@ -331,14 +332,241 @@ VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.sa
 
 ***
 
-## 两案例对照（写报告前先对号入座）
+## 案例 C：异步受理 + 轮询 — POST /api/files/async/upload（本仓库）
 
-| 维度 | 案例 A（分布式） | 案例 B（单体 CRUD） |
-|------|----------------|-------------------|
-| Inbound | gRPC Server（上游 HTTP 翻译在补充说明 + I1 关键事实） | REST + Basic 认证（contract-first） |
-| 出站 | O1–O9：gRPC ×4、HTTP ×3、Kafka ×1 | O1：Database ×1 |
-| 控制流标注 | O2 循环 2N 次、O5 feature flag、O9 条件跳过 + 异步 | 无 |
-| 容错分级 | 致命 / 静默 / 告警 / 异步四档（失败表处置枚举） | 失败即中止（失败表单行） |
-| 共性风险上提 | 「O1–O8 均无超时」只在 Summary 出现一次 | 404 特有映射（Summary 一句 + 错误映射行内加注） |
-| 折叠区示范 | 9 步编排合并为 5 步 + Body 数据实证与 Schema 校验分离 | 框架默认事务（会猜错的无）+ SQL 实证 + Body/schema 分离（openapi.yml） |
-| 特有教学点 | 错误跨层传播（422 由 frontend 翻译）；下游的下游不展开 | contract-first 入口定位；如实记录 404 而非臆改 409 |
+本项目自身端点，202 异步受理形态（formats.md §4.1）的完整示范：受理时错误走 HTTP 状态码，202 之后一切终态走轮询 body 的 `status`；代码事实于 2026-11 按 main 分支核实。本案例同时是回归金标准（`evals/evals.md`）。
+
+### Executive Summary
+
+- 功能：异步受理文件上传——预检 → 暂存 → 后台四阶段安全扫描（类型 / ClamAV / YARA / 文档威胁）→ 按结论处置文件
+- 外部依赖：O3（TCP → ClamAV daemon）、O4（子进程 → yara CLI）、O1/O6（文件系统：staging / 存储与隔离区）；进程内：O2、O5
+- 注意：全链路无鉴权、无幂等（重复上传每次新 scanId）/ 引擎故障 fail-closed 默认拒绝（异步侧表现为轮询 ERROR）/ 轮询结果 TTL 30 分钟（I2：淘汰后与进行中不可区分）
+
+> 坐标相对于 `src/main/java/zxf/upload/`（配置实际值见 `src/main/resources/application.yml`）。
+
+### Inbound
+
+#### I1. 同步 HTTP → POST /api/files/async/upload（202 异步受理，multipart）
+
+| 鉴权 | 主坐标 |
+|---|---|
+| 无 | rest/fileupload/FileUploadController.java#asyncUpload |
+
+> 受理上传：预检 → 落盘（O1）→ 分发后台扫描（O2–O6），立即 202 返回受理凭证 scanId。
+
+**关键事实**
+- 无幂等——同一文件重复上传每次生成新 scanId
+- 大小双层限制分开归因：multipart 层超限 413，业务预检拒绝 400
+- 无扩展名文件放行（扩展名白名单只拦「有扩展名但不支持」）
+
+<details><summary>处理逻辑 + Request/Response + 错误映射（通道分段）</summary>
+
+**处理逻辑**
+① 预检（Checker → UploadPolicy：空文件 / >100MB / 扩展名白名单）
+② 落盘 staging（O1，UUID 重命名保留扩展名）
+③ 生成 scanId（UUID），分发异步扫描（O2–O6，@Async 虚拟线程不等结果）
+
+**Request**
+- Method / Path: `POST /api/files/async/upload`（Content-Type: multipart/form-data）
+- 参数: `file` part（二进制；filename / size 由 MultipartFile 派生进 Command，流打开失败按 400 表达）
+- Schema 校验: 无应用层 schema 校验（缺 file part / 非 multipart 由框架层 400 拦截）；大小 / 扩展名预检属业务规则（见 ①），不写字段校验清单
+
+**Response — Success**
+```json
+202 { "scanId": "{uuid}", "status": "SCANNING", "message": "扫描进行中" }
+```
+- `scanId` → I2 轮询凭证；`filePath` 为 null 时整体省略（`@JsonInclude(NON_NULL)`）
+
+**错误映射（受理时，HTTP 状态码）**
+| 场景 | 来源 | 对外响应 | 泄漏 |
+|---|---|---|---|
+| 缺 file part / 非 multipart | 本地校验 | `400 {"code":"FILE_REJECTED"}` | 否 |
+| multipart 超限 100MB | 平台限制 | `413 FILE_TOO_LARGE` | 否 |
+| 预检拒绝（空文件 / 业务超限 / 扩展名） | 本地校验 | `400 FILE_REJECTED` + 文案 | 否 |
+| staging IO 失败 | 本地校验 | `400`「文件暂存失败」 | 否 |
+
+**错误映射（202 之后，一切终态走轮询 status，查询入口 I2）**
+| 场景 | 来源 | 对外响应 | 泄漏 |
+|---|---|---|---|
+| 管道拒绝（类型不符 / ZIP 炸弹） | 下游传播 | `200 status=REJECTED` + message | 否 |
+| 检出威胁（O3 / O4 / O5） | 下游传播 | `200 status=INFECTED`（同步端点 422 在此转移） | 否 |
+| 引擎故障 fail-closed | 下游传播 | `200 status=ERROR`（同步端点 502 在此转移；detail 只进日志） | 否 |
+
+</details>
+
+#### I2. 同步 HTTP → GET /api/files/async/scan/{scanId}（轮询）
+
+| 鉴权 | 主坐标 |
+|---|---|
+| 无 | rest/filescan/ScanResultController.java#scanStatus |
+
+> 查询扫描状态：命中结果缓存返回终态，未命中返回 SCANNING 占位，任何时刻 200。
+
+**关键事实**
+- scanId 非 UUID 格式 → 400（`@Pattern` 校验）
+- 结果缓存 TTL 30 分钟，淘汰后轮询永远返回 SCANNING——客户端无法区分「进行中」与「已淘汰」
+
+<details><summary>轮询语义 + Response 终态示例</summary>
+
+**轮询语义**
+- 进行中占位：`SCANNING`；终态：`CLEAN` / `INFECTED` / `REJECTED` / `ERROR`（CLEAN 携带打标时 message 透传，如「文件安全（macro-flagged: …）」）
+- 结果保留：Caffeine `expireAfterWrite` 30 分钟 + 上限 10 万条（防内存堆积）
+- 淘汰后轮询：返回 SCANNING 占位——与进行中不可区分，客户端无服务端超时判据（需自带放弃策略）
+
+**Response — 终态示例（CLEAN）**
+```json
+{ "scanId": "{uuid}", "status": "CLEAN", "message": "文件安全", "filePath": "{uuid}.{ext}" }
+```
+- `filePath` ← O6 入库文件名（纯文件名，无路径——防内部路径泄漏）；非 CLEAN 终态无 `filePath`
+
+</details>
+
+### Outbounds（管道短路：O2→O3→O4→O5 顺序执行，首个非 Passed 终止；背压：Semaphore=16 同步/异步共用闸门；O2–O6 运行于 @Async 虚拟线程，不阻塞 202）
+
+#### O1. 文件系统 → staging 落盘
+
+主坐标：infrastructure/fileupload/StagingService.java#stage
+
+> 把上传内容同步落盘为 {uuid}.{ext}，后续扫描只传 Path，与 multipart 请求级临时文件生命周期解耦。
+
+<details><summary>操作序列 + 失败表</summary>
+
+```text
+write  ${UPLOAD_STAGING:./data/upload-staging}/{uuid}.{ext}   ← Files.copy(multipart 流)
+delete {staging}/{uuid}.{ext}                                 ← 失败时清理残留不完整文件
+```
+
+**失败表**
+| 症状 | 处置 |
+|---|---|
+| IO 失败（磁盘满 / 权限） | 致命-中止（400，见 I1 映射） |
+
+</details>
+
+#### O2. 进程内（Tika + commons-compress）→ 类型校验 + ZIP 炸弹防护，无外部系统
+
+主坐标：application/filescan/stage/FileTypeScanStage.java#scan
+
+> MIME 探测 + 扩展名一致性 + ZIP 流式防护，探测结果（detectedMime）写入上下文供 O5 复用。
+
+**关键事实**
+- ZIP 四重上限全按实际解压逐字节计数（条目 1 万 / 单 entry 100MB / 累计 1GB / 压缩比 100:1）——header 声明值不信任
+- 不递归解压，内层 zip 由 O3/O4 对原始字节扫描兜底
+
+#### O3. TCP → ClamAV daemon（capybara INSTREAM）
+
+主坐标：infrastructure/filescan/ClamAvScanner.java#scan
+
+> 流式病毒扫描，检出返回威胁描述，引擎故障抛 502 语义异常交 fail 策略收口。
+
+**关键事实**
+- capybara 2.1.2 无 socket 超时——应用层虚拟线程限时 60s 兜底，超时计入熔断失败率
+- 熔断：10 次窗口 / 50% 失败率 / OPEN 30s；熔断打开期间调用快速失败
+
+<details><summary>协议 + 弹性 + 失败表</summary>
+
+- `INSTREAM ${CLAMAV_HOST:localhost}:${CLAMAV_PORT:3310}`（扫描 staged 文件流式上传）
+- 弹性：单次超时 `${CLAMAV_TIMEOUT_SECONDS:60}`；被放弃的挂起虚拟线程等 TCP 超时自然回收（不耗信号量许可）
+
+**失败表**
+| 症状 | 处置 |
+|---|---|
+| 不可达 / 协议错误 / 超时 | 致命-中止（fail 策略收口，见 I1 映射下半） |
+| 熔断打开 | 致命-中止（同上） |
+
+</details>
+
+#### O4. 子进程 → yara CLI（本地签名规则匹配）
+
+主坐标：infrastructure/filescan/YaraScanner.java#scan
+
+> 按内置规则集扫描文件，命中返回签名列表，超时强杀进程。
+
+**关键事实**
+- 退出码 0 = 执行成功（与是否命中无关），命中以 stdout 非空判定
+- 规则文件从 classpath 解到临时文件（deleteOnExit）；`enabled=false` 为完整逃生舱（规则缺失也能启动）
+
+<details><summary>命令行 + 退出码 + 失败表</summary>
+
+```bash
+yara -s --fail-on-warnings {rulesFile} {stagedFile}
+# rulesFile ← classpath:rules/malware.yar 启动时解到临时文件
+```
+
+- 超时：`waitFor` 60s 超时即失败；stdout 读取移入虚拟线程防子进程挂起阻塞调用线程；`finally` 强杀存活进程
+
+**失败表**
+| 症状 | 处置 |
+|---|---|
+| exit ≠ 0 / 启动失败 / 超时 | 致命-中止（见 I1 映射下半） |
+
+</details>
+
+#### O5. 进程内（Apache POI + JDK 流式解析）→ 文档威胁 + 宏策略分级，无外部系统
+
+主坐标：application/filescan/stage/DocumentThreatScanStage.java#scan
+
+> 按文档格式路由检测（OOXML / OLE2 / PDF），威胁按类别分级处置。
+
+**关键事实**
+- 仅宏（MACRO）可在 macro-policy=FLAG 时放行打标（macro-flagged）；ActiveX 与 PDF 危险动作始终拦截
+- MIME 复用 O2 的探测结果（上下文传递），不重复探测
+- PDF 关键字扫描对 FlateDecode 压缩对象流无效（已知限制，深度检测由 O3/O4 兜底）
+
+<details><summary>检测矩阵</summary>
+
+**检测矩阵**（按 O2 的 detectedMime 路由；非文档格式直通）
+| 格式 | 检测方式 | 判定 |
+|---|---|---|
+| OOXML（docx/xlsx/pptx） | ZipFile 遍历条目名 | `activex/` 条目 → ACTIVE_X（**优先于 VBA 判定**——防 FLAG 策略放行宏时绕过「始终拦截」语义）；vbaProject.bin → MACRO |
+| OLE2（doc/xls/ppt） | POI VBAMacroReader 提取宏模块 + 可疑 API token 匹配（shell / powershell 等 9 个） | 可疑宏 → MACRO；良性宏放行 |
+| PDF | 1MB 分块 + 64B 重叠窗口流式扫描 | /Launch、或 /JavaScript+/OpenAction 并存 → PDF_ACTION |
+
+</details>
+
+#### O6. 文件系统 → 处置三态（入库 / 隔离 / 清理）
+
+主坐标：application/filescan/FileScanService.java#handleResult
+
+> 按扫描状态查表执行文件生命周期：CLEAN 入库、INFECTED 隔离、其余清理 staging。
+
+**关键事实**
+- 存储与隔离均 UUID 重命名（防原名冲突与路径泄漏）；入库返回纯文件名 → I2 的 `filePath`
+- 隔离失败（跨文件系统且降级 copy+delete 也失败）仅记 ERROR 日志，威胁文件滞留 staging
+- fail-strategy=CLOSED（默认）：引擎故障拒绝上传；OPEN 时降级入库并打标 scan-engine-degraded
+
+<details><summary>处理逻辑 + 操作序列</summary>
+
+**处理逻辑**
+① CLEAN：复制入库 `{base}/{uuid}.{ext}`，删 staging（返回文件名进 I2）
+② INFECTED：移入隔离区（跨文件系统降级 copy+delete）
+③ REJECTED / ERROR：删 staging
+
+**操作序列**
+```text
+copy   {staging}/{uuid}.{ext} → ${UPLOAD_STORAGE:./data/upload-storage}/{uuid}.{ext}   ← ①
+move   {staging}/{uuid}.{ext} → ${UPLOAD_QUARANTINE:./data/upload-quarantine}/{uuid}.quarantined   ← ②
+delete {staging}/{uuid}.{ext}                                                          ← ③（① 后亦删）
+```
+- 隔离区权限：POSIX `rwx------`（构造器收敛，防同机其他账号读取威胁文件）
+
+</details>
+
+### 补充说明
+
+- **fail-open 安全守卫**：仅 `SCAN_ENGINE_ERROR` 可走 OPEN 降级入库；业务拒绝（REJECTED / INFECTED）被 fail-open 放行将是安全漏洞，守卫在 FileScanService.handleEngineFailure——降级路径只认引擎故障错误码。
+- **受理无同步阈值约束**：sync-max-file-size（20MB）只约束同步端点；异步端点仅受 100MB 总上限约束（UploadPolicy 两个判定方法分属两个 Checker 入口）。
+
+***
+
+## 三案例对照（写报告前先对号入座）
+
+| 维度 | 案例 A（分布式） | 案例 B（单体 CRUD） | 案例 C（异步受理，本仓库） |
+|------|----------------|-------------------|--------------------------|
+| Inbound | gRPC Server（上游 HTTP 翻译在补充说明 + I1 关键事实） | REST + Basic 认证（contract-first） | REST ×2：受理 202 + 轮询（无鉴权） |
+| 出站 | O1–O9：gRPC ×4、HTTP ×3、Kafka ×1 | O1：Database ×1 | O1–O6：文件系统 ×2、TCP ×1、子进程 ×1、进程内 ×2 |
+| 控制流标注 | O2 循环 2N 次、O5 feature flag、O9 条件跳过 + 异步 | 无 | 管道短路 O2→O5、背压信号量 16、全链异步、熔断 |
+| 容错分级 | 致命 / 静默 / 告警 / 异步四档（失败表处置枚举） | 失败即中止（失败表单行） | 处置三态（入库 / 隔离 / 清理）+ fail-closed/OPEN 策略 |
+| 共性风险上提 | 「O1–O8 均无超时」只在 Summary 出现一次 | 404 特有映射（Summary 一句 + 错误映射行内加注） | 无鉴权 / 无幂等上提 Summary（TTL 伪 SCANNING 归 I2 关键事实） |
+| 折叠区示范 | 9 步编排合并为 5 步 + Body 数据实证与 Schema 校验分离 | 框架默认事务（会猜错的无）+ SQL 实证 + Body/schema 分离（openapi.yml） | 错误映射通道分段两段表 + 轮询语义（SCANNING 占位 / TTL 淘汰） |
+| 特有教学点 | 错误跨层传播（422 由 frontend 翻译）；下游的下游不展开 | contract-first 入口定位；如实记录 404 而非臆改 409 | 错误语义从 HTTP 状态码转移到轮询 status；管道短路链标注；进程内卡 ×2 |

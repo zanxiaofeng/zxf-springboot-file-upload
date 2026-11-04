@@ -66,6 +66,8 @@ description: Investigate a web API endpoint's full execution path and produce a 
 
 ## 输出前自检（强制，逐条机械核对）
 
+**回路出口**：任一项不通过 → 修复对应问题后**重新逐条核对**，全过才输出；不得为过检而弱化、删改或省略事实——事实类不合格只能修实证来源或改判描述方式，不能靠隐藏过关。
+
 正确性：
 
 - [ ] 每个协议细节（参数名、报文、SQL、默认值）调查时已实证，无臆造；依据是否印出由坐标配额定，不逐句脚注
@@ -91,4 +93,5 @@ description: Investigate a web API endpoint's full execution path and produce a 
 
 - `references/formats.md` — schema 菜单（最小集 + 按需项 + 省略判据）、卡片总模板与字段/语言/符号规范、代码块与坐标配额、Inbound / Outbound 类型专属 schema（写报告前按目标类型直达 §四/§五）
 - `references/investigation-guide.md` — 入口定位速查（按技术栈）、隐式出站排查、调查深度规则、安全边界
-- `references/example.md` — 六类反例（散文化 / 编造 / 空壳 / 证据泛滥 / 数据盲区 / 主线迷失）+ 两份真实开源项目的新格式范例
+- `references/example.md` — 六类反例（散文化 / 编造 / 空壳 / 证据泛滥 / 数据盲区 / 主线迷失）+ 三份调查报告（真实开源 ×2 + 本仓库异步受理案例 C）
+- `evals/evals.md` — 回归评测协议（**修改本 skill 任何规则后必读必跑**：用固定 prompt 重跑案例 C 并 diff 基准，防规则改动引入输出回归）
