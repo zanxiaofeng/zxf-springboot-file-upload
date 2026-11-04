@@ -1,10 +1,10 @@
-# 范例：不合格反例 + 三份调查报告（真实开源 ×2 + 本仓库 ×1）
+# 范例：不合格反例 + 三份调查报告（真实项目 ×3）
 
 > 案例选自两个公开项目（Apache-2.0，代码事实于 2026-10 按 main/master 分支核实）：
 >
 > - **案例 A · 分布式形态** — [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo)（CNCF 官方 demo）：电商下单链路，gRPC × 4、HTTP 下游 × 3、Kafka × 1，展示循环调用、容错分级、错误跨层传播、共性风险上提 Summary
 > - **案例 B · 单体 CRUD 形态** — [Spring Petclinic REST](https://github.com/spring-petclinic/spring-petclinic-rest)（Spring 官方 sample）：典型 REST + JPA，覆盖 SQL 出站、认证/校验错误映射、contract-first 入口定位
-> - **案例 C · 异步受理形态** — 本仓库（zxf-springboot-file-upload）：202 受理 + 轮询 + 四阶段扫描管道，覆盖错误通道分段、轮询语义（SCANNING 占位 / TTL 淘汰）、管道短路链标注、文件系统与进程内出站
+> - **案例 C · 异步受理形态** — 一个文件上传安全扫描服务（Spring Boot 4 + 虚拟线程）：202 受理 + 轮询 + 四阶段扫描管道，覆盖错误通道分段、轮询语义（SCANNING 占位 / TTL 淘汰）、管道短路链标注、文件系统与进程内出站
 >
 > 新调查对齐此密度即可；模板、字段规范与配额见 `formats.md`。范例内嵌报告标题降一级展示（区块 `###`、卡片 `####`），独立报告中应为 `##` / `###`；折叠区形态环境自适应——本文件按 GFM 环境用 `<details>`（GitHub 等查看器中折叠），终端输出改用 `▸` 标记行 + 2 空格缩进（表格与代码块顶格）。
 
@@ -332,9 +332,9 @@ VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.sa
 
 ***
 
-## 案例 C：异步受理 + 轮询 — POST /api/files/async/upload（本仓库）
+## 案例 C：异步受理 + 轮询 — POST /api/files/async/upload（文件上传安全扫描服务）
 
-本项目自身端点，202 异步受理形态（formats.md §4.1）的完整示范：受理时错误走 HTTP 状态码，202 之后一切终态走轮询 body 的 `status`；代码事实于 2026-11 按 main 分支核实。本案例同时是回归金标准（`evals/evals.md`）。
+一个文件上传安全扫描服务的异步受理端点，202 异步受理形态（formats.md §4.1）的完整示范：受理时错误走 HTTP 状态码，202 之后一切终态走轮询 body 的 `status`；代码事实于 2026-11 实证核实。
 
 ### Executive Summary
 
@@ -342,7 +342,7 @@ VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.sa
 - 外部依赖：O3（TCP → ClamAV daemon）、O4（子进程 → yara CLI）、O1/O6（文件系统：staging / 存储与隔离区）；进程内：O2、O5
 - 注意：全链路无鉴权、无幂等（重复上传每次新 scanId）/ 引擎故障 fail-closed 默认拒绝（异步侧表现为轮询 ERROR）/ 轮询结果 TTL 30 分钟（I2：淘汰后与进行中不可区分）
 
-> 坐标相对于 `src/main/java/zxf/upload/`（配置实际值见 `src/main/resources/application.yml`）。
+> 坐标相对于该服务源码主包根（upload 模块；配置实际值见 application.yml）。
 
 ### Inbound
 
@@ -356,8 +356,8 @@ VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.sa
 
 **关键事实**
 - 无幂等——同一文件重复上传每次生成新 scanId
-- 大小双层限制分开归因：multipart 层超限 413，业务预检拒绝 400
-- 无扩展名文件放行（扩展名白名单只拦「有扩展名但不支持」）
+- 大小双层限制分开归因：multipart 层超限 413（单文件 100MB / 整请求 110MB），业务预检拒绝 400
+- 无扩展名文件通过受理预检（白名单只拦「有扩展名但不支持」），但被 O2 判「类型与扩展名不符」拒绝——终态轮询 REJECTED 而非受理 400
 
 <details><summary>处理逻辑 + Request/Response + 错误映射（通道分段）</summary>
 
@@ -400,18 +400,18 @@ VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.sa
 |---|---|
 | 无 | rest/filescan/ScanResultController.java#scanStatus |
 
-> 查询扫描状态：命中结果缓存返回终态，未命中返回 SCANNING 占位，任何时刻 200。
+> 查询扫描状态：格式合法的 scanId 恒 200——命中结果缓存返回终态，未命中返回 SCANNING 占位。
 
 **关键事实**
 - scanId 非 UUID 格式 → 400（`@Pattern` 校验）
-- 结果缓存 TTL 30 分钟，淘汰后轮询永远返回 SCANNING——客户端无法区分「进行中」与「已淘汰」
+- 结果缓存 TTL 30 分钟且纯内存——淘汰或重启丢失后与「进行中」不可区分
 
 <details><summary>轮询语义 + Response 终态示例</summary>
 
 **轮询语义**
 - 进行中占位：`SCANNING`；终态：`CLEAN` / `INFECTED` / `REJECTED` / `ERROR`（CLEAN 携带打标时 message 透传，如「文件安全（macro-flagged: …）」）
 - 结果保留：Caffeine `expireAfterWrite` 30 分钟 + 上限 10 万条（防内存堆积）
-- 淘汰后轮询：返回 SCANNING 占位——与进行中不可区分，客户端无服务端超时判据（需自带放弃策略）
+- 淘汰后轮询：返回 SCANNING 占位——与进行中不可区分，客户端无服务端超时判据（需自带放弃策略）；缓存纯内存，服务重启后全部 scanId 失联，同样恒返占位
 
 **Response — 终态示例（CLEAN）**
 ```json
@@ -555,13 +555,14 @@ delete {staging}/{uuid}.{ext}                                                   
 ### 补充说明
 
 - **fail-open 安全守卫**：仅 `SCAN_ENGINE_ERROR` 可走 OPEN 降级入库；业务拒绝（REJECTED / INFECTED）被 fail-open 放行将是安全漏洞，守卫在 FileScanService.handleEngineFailure——降级路径只认引擎故障错误码。
-- **受理无同步阈值约束**：sync-max-file-size（20MB）只约束同步端点；异步端点仅受 100MB 总上限约束（UploadPolicy 两个判定方法分属两个 Checker 入口）。
+- **同步对照端点**：`POST /api/files/sync/upload` 共用 O1–O6、同一信号量背压与同一处置映射；差异仅在终态表达（同步抛 BusinessException → HTTP 400/422/502，异步收敛为轮询 status）与路由阈值（同步超 20MB 预检 400 引导走异步端点，异步仅受 100MB 总上限约束）。
+- **管道总开关**：`enabled=false` 时 O2–O5 全部直通（CLEAN 直接入库），受理预检与 O1/O6 仍执行。
 
 ***
 
 ## 三案例对照（写报告前先对号入座）
 
-| 维度 | 案例 A（分布式） | 案例 B（单体 CRUD） | 案例 C（异步受理，本仓库） |
+| 维度 | 案例 A（分布式） | 案例 B（单体 CRUD） | 案例 C（异步受理） |
 |------|----------------|-------------------|--------------------------|
 | Inbound | gRPC Server（上游 HTTP 翻译在补充说明 + I1 关键事实） | REST + Basic 认证（contract-first） | REST ×2：受理 202 + 轮询（无鉴权） |
 | 出站 | O1–O9：gRPC ×4、HTTP ×3、Kafka ×1 | O1：Database ×1 | O1–O6：文件系统 ×2、TCP ×1、子进程 ×1、进程内 ×2 |
