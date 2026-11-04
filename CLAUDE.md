@@ -42,7 +42,7 @@ rest/fileupload/representation/  UploadResponse（record，受理回执模型；
 ## 常用命令
 
 - 编译：`mvn compile -q`
-- 测试：`mvn clean test -q`（约 30s，58 个测试；**增量编译会被 IDE 的 ECJ 占位 class 污染，验证一律 clean**）
+- 测试：`mvn clean test -q`（约 30s，78 个测试；**增量编译会被 IDE 的 ECJ 占位 class 污染，验证一律 clean**）
 
 ## Hooks（`.claude/settings.json`）
 
