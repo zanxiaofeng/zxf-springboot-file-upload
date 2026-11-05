@@ -17,7 +17,7 @@
 - 检查 AOP 切面 / 拦截器 / Filter / 中间件中是否有网络或 DB 操作
 - 检查动态代理（JDK Proxy / CGLIB）与字节码增强（ASM / ByteBuddy）
 - 检查框架级出站：Spring Cloud Feign / RestTemplate 拦截器 / gRPC ClientInterceptor / `@Async` 后台任务 / `@EventListener` 事件链
-- 排查后仍无法定位的，在报告中标注「疑似隐式出站，未在源码确认」，**不得臆造**
+- 二者区分：**放弃** = 未查、不查且报告中不提（原则三默认姿态）；**查而未果** = 已排查但无法定位，在报告中标注「疑似隐式出站，未在源码确认」，**不得臆造**
 
 ## 出站交互三类（判定标准：跨进程 / 跨网络 / 跨信任边界）
 
