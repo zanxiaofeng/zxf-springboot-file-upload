@@ -7,7 +7,7 @@ description: Investigate a web API endpoint's full execution path and produce a 
 
 ## 产出目标与总原则
 
-产出 = **Executive Summary + Inbound 卡片（通常 1 张；多入口时 I{n}）+ N 张 Outbound 卡片**。概念模型：1 个 server span（Inbound）+ N 个 client span（Outbounds）；path 用路由模板（`/api/users/{id}`）。服务于接口文档化、新人 onboarding、故障排查、安全与依赖审查。
+产出 = **Executive Summary + Inbound 卡片（通常 1 张；多入口时 I{n}——异步受理的轮询端点是独立路由、独立 server span，按独立 I 卡拆分）+ N 张 Outbound 卡片**。概念模型：1 个 server span（Inbound）+ N 个 client span（Outbounds）；path 用路由模板（`/api/users/{id}`）。服务于接口文档化、新人 onboarding、故障排查、安全与依赖审查。
 
 **原则一（结论优先）**：报告是「结论 + 验证入口」，不是「源码摘要 + 逐句脚注 + 全量填表」——主阅读路径（Summary + 每卡一句话摘要 + 关键事实）只放结论；证据按风险配额发放；细节折叠；schema 项按需选取，无内容即整段省略。
 
@@ -20,7 +20,7 @@ description: Investigate a web API endpoint's full execution path and produce a 
 1. **定位入口** — route 定义处（定位方法见 `references/investigation-guide.md`）。记录 HTTP method、path 模板、参数来源（path / query / header / cookie / body）、入站前置限制（请求体上限、过滤器/中间件、认证授权）。
 2. **沿调用链下行** — handler → 应用/用例层 → 领域逻辑 → 基础设施客户端，直到进程边界。注意纯转发层（门面/代理）——真正的编排在它下一层，别在此停。
 3. **识别出站交互** — 判定标准：**跨进程 / 跨网络 / 跨信任边界**（网络出站、本机出站、进程内重计算三类，细则见 guide）；只展开本服务直接发出的一跳。
-4. **实证提取协议真实格式 + 追踪数据流** — SQL / 命令 / 报文一律从客户端代码**实证提取**，禁止臆造；动态值写 `{占位符}`；配置默认值与覆盖关系交叉核实，`${ENV:default}` 原样保留。同步追踪**字段流向**：入参字段 → 出站请求字段 → 出站响应字段 → 最终响应字段——数据映射是调查动作，不是写报告时回补的。
+4. **实证提取协议真实格式 + 追踪数据流** — SQL / 命令 / 报文一律从客户端代码**实证提取**，禁止臆造；动态值写 `{占位符}`；配置默认值与覆盖关系交叉核实——带默认值的可变配置统一本库记法 `${ENV:default}`，项目配置原样为 `${ENV:-default}` 等 shell/compose 形态则照抄不改写（细则见 formats.md §一）。同步追踪**字段流向**：入参字段 → 出站请求字段 → 出站响应字段 → 最终响应字段——数据映射是调查动作，不是写报告时回补的。
 5. **识别控制流** — 短路（管道/责任链/校验链）、条件分支（开关/feature flag）、并行、异步、弹性（超时/重试/熔断）、背压（信号量/限流）。决定 Outbounds 编号次序与标注方式。
 
 ## 输出骨架（强制，违反即不合格）
@@ -59,7 +59,7 @@ description: Investigate a web API endpoint's full execution path and produce a 
 ## 密度与证据配额（硬上限，细则见 formats.md §二/§三）
 
 - **处理逻辑**（折叠区内）：①②③ 编号，每步动词开头 ≤ 30 字，≤ 5 步——超出先合并为更高层意图；步骤之间不用箭头、禁「然后/随后/接着」（步内 O 编号链可用 `→`，如「管道 O2→O3→O4」）；不展开下游内部（写「调用 O2」即可）；控制流行内标注：`②（循环：逐商品 2N 次）`、`③（与 ② 并行）`、`④（条件：flag 开启时）`、`⑤（异步：不等结果）`；摘要已承载流程的简单卡整段省略
-- **代码块**：主路径（折叠区外）**零代码块**；块级引用白名单只有「字面值即事实」者（SQL、路由/URL、请求/响应报文、配置键、注解、topic）且只进折叠区、每段 ≤ 5 行；行内标识符引用（`orderService.deduct()`）每卡 ≤ 5 处
+- **代码块**：主路径（折叠区外）**零代码块**；块级引用白名单只有「字面值即事实」者（SQL、请求/响应报文、路由/URL、Header/配置键名、注解、MQ topic/消息类型名、C:/S: 报文交换图，及各类型 schema 的命令行/命令序列/操作序列——完整白名单见 formats.md §三）且只进折叠区、每段 ≤ 5 行、全报告块级代码块总数 ≤ 卡片数；行内标识符引用（`orderService.deduct()`）每卡 ≤ 5 处
 - **坐标**：三层——L1 主坐标每卡恰好 1 个（元信息表）；L2 风险坐标每卡 ≤ 2 个（关键事实内）；其余结论 0 个（L1 兜底）。每卡合计 ≤ 3 个，坐标 + 行内代码每卡 ≤ 5 处；同文件多处合并为区间或方法级；路径去共享前缀，格式统一 `文件:行` / `文件:起-止` / `文件#方法` / `文件`（整文件级——一个文件一个 handler 的路由文件等）
 - **事实唯一**：任一事实完整描述只出现 1 次，别处编号引用；跨卡片共性二选一——Summary 完整写一次（各卡不再写）或 Summary 一句带过（拥有卡写完整），选定后不得混用；补充说明只放跨卡片信息，禁止复述单卡内容
 - **无空壳**：按需 schema 项无实质内容时整段省略——省略 ✅，置「无/不适用」❌，写「无特殊错误映射」❌❌；默认值（默认无限流/无重试）、显然行为（GET 无请求体）、必然推论（写了 `@Transactional` 不再单列回滚）一律省略；「无 X」只在属于「会猜错的无」（读者默认它存在而实际没有）时出现
@@ -91,7 +91,7 @@ description: Investigate a web API endpoint's full execution path and produce a 
 
 ## 参考文件
 
-- `references/formats.md` — schema 菜单（最小集 + 按需项 + 省略判据）、卡片总模板与字段/语言/符号规范、代码块与坐标配额、Inbound / Outbound 类型专属 schema（写报告前按目标类型直达 §四/§五）
+- `references/formats.md` — schema 菜单（最小集 + 按需项 + 省略判据）、卡片总模板与字段/语言/符号规范、代码块与坐标配额、Inbound / Outbound 类型专属 schema 与速查表（写报告前按目标类型直达 §四/§五，快速核对 §六）
 - `references/investigation-guide.md` — 入口定位速查（按技术栈）、隐式出站排查、调查深度规则、安全边界
 - `references/example.md` — 六类反例（散文化 / 编造 / 空壳 / 证据泛滥 / 数据盲区 / 主线迷失）+ 三份调查报告（真实项目 ×3：分布式 / 单体 CRUD / 异步受理）
 - `evals/evals.md` — 回归评测协议（**修改本 skill 任何规则后必读必跑**：用固定 prompt 重跑所在项目金标准案例并 diff 基准，防规则改动引入输出回归）
