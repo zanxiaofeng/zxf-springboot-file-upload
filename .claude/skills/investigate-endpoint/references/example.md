@@ -1,6 +1,6 @@
 # 范例：不合格反例 + 三份调查报告（真实项目 ×3）
 
-> 案例选自两个公开项目（Apache-2.0，代码事实于 2026-10 按 main/master 分支核实）：
+> 案例选自两个公开项目（Apache-2.0；案例 A 事实于 2026-11、案例 B 于 2026-10 按 main/master 分支核实）：
 >
 > - **案例 A · 分布式形态** — [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo)（CNCF 官方 demo）：电商下单链路，gRPC × 4、HTTP 下游 × 3、Kafka × 1，展示循环调用、容错分级、错误跨层传播、共性风险上提 Summary
 > - **案例 B · 单体 CRUD 形态** — [Spring Petclinic REST](https://github.com/spring-petclinic/spring-petclinic-rest)（Spring 官方 sample）：典型 REST + JPA，覆盖 SQL 出站、认证/校验错误映射、contract-first 入口定位
@@ -34,7 +34,7 @@
 
 - 功能：结算下单——取购物车 → 逐商品组装报价 → 运费换汇 → 扣款 → 发货 → 收尾三连（清购物车 / 邮件 / 发事件）
 - 外部依赖：O1 取购物车、O2 逐商品组装报价（循环）、O3 运费报价、O4 运费换汇、O5 扣款、O6 发货（gRPC ×4 + HTTP ×2）、O7 清购物车、O8 确认邮件、O9 Kafka 订单事件
-- 注意：O1–O8 全部无超时 / deadline 配置（默认无限等待）；O9 at-most-once，或丢消息；O7/O8/O9 失败不影响下单结果
+- 注意：O1–O7 无超时 / deadline 配置（默认无限等待）；O9 at-most-once（NoResponse），或丢消息；O7/O8/O9 失败不影响下单结果
 
 > 坐标相对于仓库根；checkout 服务代码在 `src/checkout/`。
 
@@ -50,6 +50,7 @@
 
 **关键事实**
 - 无幂等——重放产生重复订单
+- flag `EmitRawPii` 开启时明文卡号 / CVV 写入 span 属性（泄漏面在可观测后端）
 - 客户端可见错误由 frontend 翻译为 422/500（细则见补充说明）src/frontend/pages/api/checkout.ts
 
 <details><summary>处理逻辑 + Request/Response + 错误映射</summary>
@@ -58,19 +59,19 @@
 ① 取购物车（O1）
 ② 组装报价（O2，循环：购物车 N 件 = 2N 次调用）
 ③ 运费报价与换汇（O3 → O4）
-④ 扣款（O5，条件：flag `paymentUnreachable` 开启时连坏地址——demo 故障注入）
-⑤ 发货（O6）；收尾：清购物车（O7，失败静默）；邮件（O8，失败告警）；发事件（O9，异步）
+④ 扣款（O5，条件：flag `PaymentUnreachable` 开启时连坏地址——demo 故障注入）
+⑤ 发货（O6）；收尾：清购物车（O7，失败静默）；邮件（O8，失败告警）；发事件（O9，at-most-once）
 
 **Request**
 - Body（数据承载）: `PlaceOrderRequest`（protobuf，schema 定义在 `demo.proto`）——真实字段 JSON 示意：
 ```json
 { "userId": "{id}", "userCurrency": "{code}", "email": "{email}",
   "address": { "streetAddress": "{…}", "city": "{…}", "…": "{…}" },
-  "creditCard": { "number": "{…}", "expirationMonth": "{m}", "expirationYear": "{y}", "cvv": "{…}" } }
+  "creditCard": { "creditCardNumber": "{…}", "creditCardExpirationMonth": "{m}", "creditCardExpirationYear": "{y}", "creditCardCvv": "{…}" } }
 ```
 - Schema 校验: 无应用层校验（protobuf 解析失败即 gRPC error）
 
-**Response — Success**：`OK`（frontend → HTTP 200）；`{ order: { orderId, shippingTrackingId, items[], shippingCost, total } }`
+**Response — Success**：`OK`（frontend → HTTP 200）；`{ order: { orderId, shippingTrackingId, shippingCost, shippingAddress, items[] } }`（无 total——合计只进日志与 span）
 
 **错误映射**
 | 场景 | 来源 | 对外响应 | 泄漏 |
@@ -84,7 +85,7 @@
 
 #### O1. gRPC → cart 服务（取购物车）
 
-主坐标：`src/checkout/main.go#prepare`
+主坐标：`src/checkout/main.go#getUserCart`
 
 > CALL GetCart 取 items 返回主流程。
 
@@ -101,14 +102,14 @@
 
 #### O2. gRPC → product-catalog + currency（逐商品组装，循环 2N 次）
 
-主坐标：`src/checkout/main.go#prepare`
+主坐标：`src/checkout/main.go#prepOrderItems`
 
 > 每件商品取品名再换汇到用户币种，串行两连调。
 
 <details><summary>Method 与 Message + 失败表</summary>
 
-- a. `CALL oteldemo.ProductCatalogService/GetProduct`（addr=`${PRODUCT_CATALOG_ADDR}`）；`{ id }` → `{ name, usd }`
-- b. `CALL oteldemo.CurrencyService/Convert`（addr=`${CURRENCY_ADDR}`）；`{ from=USD, to={userCurrency}, units, nanos }` → `{ currencyCode, units, nanos }`
+- a. `CALL oteldemo.ProductCatalogService/GetProduct`（addr=`${PRODUCT_CATALOG_ADDR}`）；`{ id }` → `{ name, priceUsd }`
+- b. `CALL oteldemo.CurrencyService/Convert`（addr=`${CURRENCY_ADDR}`）；`{ from={priceUsd}, toCode={userCurrency} }` → Money `{ currencyCode, units, nanos }`
 
 **失败表**
 | 症状 | 处置 |
@@ -121,14 +122,14 @@
 
 | 路由 | 主坐标 |
 |---|---|
-| `POST ${SHIPPING_ADDR}/get-quote` | src/checkout/main.go#shipOrder |
+| `POST ${SHIPPING_ADDR}/get-quote` | src/checkout/main.go#quoteShipping |
 
-> 取 costUsd 参与订单合计。
+> 取运费报价参与订单合计。
 
 <details><summary>Request / Response + 失败表</summary>
 
 - Headers: `Content-Type: application/json`；Body: `{ "address": {…}, "items": [ { "productId", "quantity" } ] }`
-- Success: `200 { "costUsd": { "units": {u}, "nanos": {n} } }`
+- Success: `200 { "cost_usd": { "units": {u}, "nanos": {n} } }`（JSON tag 原样 snake_case）
 
 **失败表**
 | 症状 | 处置 |
@@ -139,13 +140,13 @@
 
 #### O4. gRPC → currency 服务（运费换汇）
 
-主坐标：`src/checkout/main.go#shipOrder`
+主坐标：`src/checkout/main.go#convertCurrency`
 
 > 运费 USD 换算到用户币种（与 O2b 同一 Convert 方法）。
 
 <details><summary>Method 与 Message + 失败表</summary>
 
-- `CALL oteldemo.CurrencyService/Convert`；`{ from=USD, to={userCurrency}, amount=运费 }` → `{ currencyCode, units, nanos }`
+- `CALL oteldemo.CurrencyService/Convert`；`{ from={运费USD}, toCode={userCurrency} }` → Money `{ currencyCode, units, nanos }`
 
 **失败表**
 | 症状 | 处置 |
@@ -158,13 +159,13 @@
 
 | 触发 | 主坐标 |
 |---|---|
-| 条件（flag `paymentUnreachable` 开启时连坏地址——demo 故障注入） | src/checkout/main.go#charge |
+| 条件（flag `PaymentUnreachable`——demo 故障注入） | src/checkout/main.go#chargeCard |
 
-> CALL Charge 扣款（商品 + 运费合计），取 transactionId 进订单。
+> CALL Charge 扣款（商品 + 运费合计）；transactionId 只进日志与 span，不进订单回执。
 
 <details><summary>Method 与 Message + 失败表</summary>
 
-- `CALL oteldemo.PaymentService/Charge`（addr=`${PAYMENT_ADDR}`）；`{ userId, creditCard, amount }` → `{ transactionId }`
+- `CALL oteldemo.PaymentService/Charge`（addr=`${PAYMENT_ADDR}`）；`{ amount, creditCard }` → `{ transactionId }`
 
 **失败表**
 | 症状 | 处置 |
@@ -184,7 +185,7 @@
 <details><summary>Request / Response + 失败表</summary>
 
 - Body: `{ "address": {…}, "items": [{…}] }`
-- Success: `200 { "trackingId": "{trackingId}" }`
+- Success: `200 { "tracking_id": "{trackingId}" }`（JSON tag 原样 snake_case）
 
 **失败表**
 | 症状 | 处置 |
@@ -195,7 +196,7 @@
 
 #### O7. gRPC → cart 服务（清空购物车，收尾步）
 
-主坐标：`src/checkout/main.go#emptyCart`
+主坐标：`src/checkout/main.go#emptyUserCart`
 
 > 下单成功后清空购物车。
 
@@ -214,9 +215,12 @@
 
 | 路由 | 主坐标 |
 |---|---|
-| `POST ${EMAIL_ADDR}/send_order_confirmation` | src/checkout/main.go |
+| `POST ${EMAIL_ADDR}/send_order_confirmation` | src/checkout/main.go#sendOrderConfirmation |
 
-> 发订单确认邮件（email + 订单全文）；响应无业务消费（源码不解析——告知性调用）。
+> 发订单确认邮件（Body `{email, order}`）；响应无业务消费（源码不解析——告知性调用）。
+
+**关键事实**
+- 全链路唯一显式超时：1s（const `emailRequestTimeout`）
 
 <details><summary>失败表</summary>
 
@@ -226,22 +230,23 @@
 
 </details>
 
-#### O9. MQ → orders topic（Kafka 异步生产者）
+#### O9. MQ → orders topic（Kafka，sarama 异步生产者）
 
-主坐标：`src/checkout/kafka/producer.go#sendToPostProcessor`
+主坐标：`src/checkout/main.go#sendToPostProcessor`
 
-> 异步发送订单事件（protobuf OrderResult），不阻塞下单响应。
+> 发送订单事件（protobuf OrderResult）；同步等本地确认，NoResponse 不等 broker。
 
 **关键事实**
 - `${KAFKA_ADDR}` 为空时整步跳过（条件执行）
 - 携带 W3C traceparent header（消费侧 fraud-detection 以此关联链路）
+- flag `KafkaQueueProblems` > 0 时额外注入 N 条过载消息（demo 故障注入）
 
 <details><summary>消息定义 + 可靠性 + 失败表</summary>
 
-- `SEND topic=${KAFKA_TOPIC:-orders} key={orderId}`（key 保序）；payload：OrderResult（protobuf：orderId / shippingTrackingId / shippingCost / items / transactionId）
+- `SEND topic=${KAFKA_TOPIC:orders}`（无 key，不保序）；payload：OrderResult（protobuf：orderId / shippingTrackingId / shippingCost / shippingAddress / items）
 
 **可靠性**
-- `RequiredAcks=NoResponse`——at-most-once，可能丢消息，下游需对账；无本地重试
+- sarama `RequiredAcks=NoResponse`——at-most-once，可能丢消息，下游需对账；无本地重试
 
 **失败表**
 | 症状 | 处置 |
@@ -321,7 +326,7 @@ VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.sa
 ```
 
 - 入参：Owner 实体五字段（`model/Owner.java`，@Table owners）；映射：persist 回填 `id` → I1 的 `Location` 头与 body（数据流向标注）
-- 附注（不在本链路）：后续读路径参考 getOwner 的 `SELECT … FROM owners WHERE id = ?`
+- 附注（不在本链路）：后续读路径参考 `ClinicServiceImpl#getOwner`（按 id 单行查询，形态与上同）
 
 **失败表**
 | 症状 | 处置 |
@@ -519,7 +524,7 @@ yara -s --fail-on-warnings {rulesFile} {stagedFile}
 | 格式 | 检测方式 | 判定 |
 |---|---|---|
 | OOXML（docx/xlsx/pptx） | ZipFile 遍历条目名 | `activex/` 条目 → ACTIVE_X（**优先于 VBA 判定**——防 FLAG 策略放行宏时绕过「始终拦截」语义）；vbaProject.bin → MACRO |
-| OLE2（doc/xls/ppt） | POI VBAMacroReader 提取宏模块 + 可疑 API token 匹配（shell / powershell 等 9 个） | 可疑宏 → MACRO；良性宏放行 |
+| OLE2（doc/xls/ppt） | POI VBAMacroReader 提取宏模块 + 可疑 API token 匹配（shell / powershell 等 10 个） | 可疑宏 → MACRO；良性宏放行 |
 | PDF | 1MB 分块 + 64B 重叠窗口流式扫描 | /Launch、或 /JavaScript+/OpenAction 并存 → PDF_ACTION |
 
 </details>
@@ -566,8 +571,8 @@ delete {staging}/{uuid}.{ext}                                                   
 |------|----------------|-------------------|--------------------------|
 | Inbound | gRPC Server（上游 HTTP 翻译在补充说明 + I1 关键事实） | REST + Basic 认证（contract-first） | REST ×2：受理 202 + 轮询（无鉴权） |
 | 出站 | O1–O9：gRPC ×4、HTTP ×3、Kafka ×1 | O1：Database ×1 | O1–O6：文件系统 ×2、TCP ×1、子进程 ×1、进程内 ×2 |
-| 控制流标注 | O2 循环 2N 次、O5 feature flag、O9 条件跳过 + 异步 | 无 | 管道短路 O2→O5、背压信号量 16、全链异步、熔断 |
-| 容错分级 | 致命 / 静默 / 告警 / 异步四档（失败表处置枚举） | 失败即中止（失败表单行） | 处置三态（入库 / 隔离 / 清理）+ fail-closed/OPEN 策略 |
+| 控制流标注 | O2 循环 2N 次、O5 feature flag、O9 条件跳过 + at-most-once | 无 | 管道短路 O2→O5、背压信号量 16、全链异步、熔断 |
+| 容错分级 | 致命 / 静默 / 告警 / 尽力而为四档（失败表处置枚举） | 失败即中止（失败表单行） | 处置三态（入库 / 隔离 / 清理）+ fail-closed/OPEN 策略 |
 | 共性风险上提 | 「O1–O8 均无超时」只在 Summary 出现一次 | 404 特有映射（Summary 一句 + 错误映射行内加注） | 无鉴权 / 无幂等上提 Summary（TTL 伪 SCANNING 归 I2 关键事实） |
 | 折叠区示范 | 9 步编排合并为 5 步 + Body 数据实证与 Schema 校验分离 | 框架默认事务（会猜错的无）+ SQL 实证 + Body/schema 分离（openapi.yml） | 错误映射通道分段两段表 + 轮询语义（SCANNING 占位 / TTL 淘汰） |
 | 特有教学点 | 错误跨层传播（422 由 frontend 翻译）；下游的下游不展开 | contract-first 入口定位；如实记录 404 而非臆改 409 | 错误语义从 HTTP 状态码转移到轮询 status；管道短路链标注；进程内卡 ×2 |

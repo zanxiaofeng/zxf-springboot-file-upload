@@ -6,7 +6,7 @@
 
 > 术语消歧：本库的「schema / 菜单 / 类型专属 schema」指**报告模板**（写报告的格式菜单）；「Schema 校验 / Body schema」指**被调查系统的请求契约**——两个不同物，勿混。
 
-schema 列出的是「可以写什么」——按实际发现挑选要写的项，未发现的项**整段不出现**。模板示例是通用业务场景（订单/通知/归档），一律替换为目标代码**实证**出的真实值；动态值 `{占位符}`，可变配置保留 `${ENV:default}` 原样；schema 字段的**值**保持原生格式——SQL 原文、原生 JSON 报文、命令序列、C:/S: 报文交换图（均为折叠区内容）。
+schema 列出的是「可以写什么」——按实际发现挑选要写的项，未发现的项**整段不出现**。模板示例是通用业务场景（订单/通知/归档），一律替换为目标代码**实证**出的真实值；动态值 `{占位符}`；可变配置带默认值时统一本库记法 `${ENV:default}`（实证抄录时项目配置文件原样为 `${ENV:-default}` 等 shell/compose 形态的，原样保留不改写）；schema 字段的**值**保持原生格式——SQL 原文、原生 JSON 报文、命令序列、C:/S: 报文交换图（均为折叠区内容）。
 
 **每卡最小集**（缺一不成卡）：编号（I1 / O2）、类型、目标、一句话摘要、主坐标。
 
@@ -131,6 +131,7 @@ Inbound 例：
 1. **白名单**：块级引用只允许「字面值即事实」者——SQL、**请求/响应报文（真实字段实证的数据结构，数据流动核心）**、路由/URL、Header/配置键名、注解、MQ topic/消息类型名、C:/S: 报文交换图；且只进折叠区，每段 ≤ 5 行（超出裁剪到能证明结论的最小片段，`{…}` 压缩）。函数体、语句块、控制流、变量声明、类定义、方法签名一律禁止
 2. **行内**：标识符级引用（`orderService.deduct()`、`OrderStatus.FAILED`）是名词不是语句，可用；每卡 ≤ 5 处
 3. **主路径零代码块**——折叠区外一个代码块都没有，是最直观的验收标准
+4. **全报告块级代码块总数 ≤ 卡片数**——超出即证据泛滥（与 SKILL.md 自检同口径）
 
 代码在干什么 → 别贴代码，这样写：
 
@@ -153,7 +154,7 @@ Inbound 例：
 | L3 普通结论 | 其余全部 | 0 个 | 靠 L1 兜底 |
 
 - 合并：同文件相邻行 → `:88-93` 区间；同方法多处 → `OrderService#createOrder（多处）`；调用链只留最外层一跳；整文件级（一个文件一个 handler 的路由文件等）可裸文件
-- 路径压缩：报告开头声明一次相对前缀；正文短路径；文件名仓库内唯一时省目录。格式统一 `文件:行` / `文件:起-止` / `文件#方法`，禁 `L88`、`line 88`、`第88行`
+- 路径压缩：报告开头声明一次相对前缀；正文短路径；文件名仓库内唯一时省目录。格式统一 `文件:行` / `文件:起-止` / `文件#方法` / `文件`（整文件级），禁 `L88`、`line 88`、`第88行`
 - 禁止坐标的位置：一句话摘要内、处理逻辑每步后、失败表与错误映射表行内、元信息表非主坐标字段、补充说明
 - 配额：每卡 ≤ 3 个（1 锚点 + 2 风险）；全报告 ≤ 卡片数 × 2；处理逻辑区坐标 = 0（折叠区源码片段除外）；坐标 + 行内代码每卡合计 ≤ 5 处（防跷跷板）
 - 判据：删掉这个坐标，读者还能通过主坐标找到吗？能 → 删；不能 → 检查能否并入区间
@@ -165,7 +166,7 @@ Inbound 例：
 菜单：`Request（入参契约）/ Response — Success / 错误映射表`；契约定义位置由主坐标覆盖，contract-first 项目在关键事实注明 spec 来源（`operationId`）。
 
 **Request**
-- Method / Path: `POST /api/orders`（gRPC 写全限定 method `oteldemo.OrderService/CreateOrder` + request message）
+- Method / Path: `POST /api/orders`（gRPC 写 proto 全限定 method `oteldemo.OrderService/CreateOrder` + request message；HTTP/2 传输层 `:path` 前导 `/`，即 `/oteldemo.OrderService/CreateOrder`）
 - 参数: Path `{orderId}`；Query / Headers 按需（参数来源即流向起点；类型与必填属字段 check，不写）
 - **Body（数据承载，数据流动的核心——完整实证）**: 真实字段名 + 真实结构，动态值 `{占位符}`——`{ "skuId": "{…}", "qty": {n} }`；关键字段可缀来源标注（`orderId ← I1 入参` / `← O2 响应`）；非 JSON 载体按原生形态（multipart 各 part / XML / 二进制流说明）；序列化细节核实（null 省略、camelCase/snake_case、包装信封）
 - Schema 校验（与 Body 分开表达，勿混为一谈）: 机制一句话——Bean Validation / OpenAPI 运行时校验 / Schema Registry / 无（「无校验」属会猜错的无，必写）；schema 整体引用（Bean 类 / schema 文件 / `.proto` message / registry subject）；**单个字段的 check 默认不写**——仅当该字段的判定影响关键处理流程（决定路由 / 分支 / 短路 / 处置去向）时才写，写成流程事实（如「type=officedocument → 进 O5 文档分支」）而非校验清单；范围只限 Inbound 请求侧，出站 payload 校验（O 卡）不调查不输出
@@ -202,7 +203,7 @@ Inbound 例：
 菜单：`Request / Response — Success / 失败表`；客户端库（RestClient / WebClient / axios / fetch…）写进标题关键属性或 Request 首行。
 
 **Request**
-- Method / Path: `POST ${NOTIFICATION_BASE_URL:-http://notify.internal}/api/v1/notifications`
+- Method / Path: `POST ${NOTIFICATION_BASE_URL:http://notify.internal}/api/v1/notifications`
 - Headers: `Authorization: Bearer {token 的来源：配置/令牌服务/请求透传}`；`Idempotency-Key: {orderId}`（如有）
 - Body: `{ "userId": "{id}", "event": "USER_CREATED" }`
 
@@ -237,9 +238,9 @@ Inbound 例：
 
 ### 5.4 消息队列（Producer）
 
-菜单：`消息定义 / 发送模式 / 可靠性 / 失败表`。Kafka 与 AMQP 各按原生格式。
+菜单：`消息定义 / 发送模式 / 可靠性 / 失败表`。Kafka 无原生文本命令（二进制协议）——`SEND` 为伪命令记法，配 producer 配置语义表达；AMQP 按协议方法原名。
 
-- 消息定义: `SEND topic=${KAFKA_TOPIC:-orders} key={orderId}`；payload 与序列化格式；key 分区语义（保序）；AMQP 写 `PUBLISH exchange={} routing-key={} mandatory=false` + props（`delivery_mode=2` 持久化）
+- 消息定义: `SEND topic=${KAFKA_TOPIC:orders} key={orderId}`；payload 与序列化格式；key 分区语义（保序）；AMQP 写 `basic.publish exchange={} routing-key={} mandatory=false` + props（`delivery_mode=2` 持久化——需 queue 同时 durable 才真正落盘，会猜错必写）
 - 发送模式: 同步 / 异步生产者；事务消息 / 普通发送
 - 可靠性: 确认（`acks=all` / publisher confirm / `RequiredAcks=NoResponse`）与投递语义（at-least-once / at-most-once）——**必写，它决定下游对账方式**；失败兜底（本地重试 → 落表 `mq_outbox` 补偿 / 记 ERROR 丢弃）
 - 失败表：如 `Broker 不可达 | 降级-落outbox补偿`；`发送超时 | 忽略-记日志（at-most-once）`
@@ -259,18 +260,18 @@ Inbound 例：
 
 菜单：`操作与路径 / 请求头与元数据 / 凭证与 SDK 行为 / 失败表`。
 
-- `PUTObject bucket={bucket} key={prefix}/{yyyyMM}/{uuid}.zip`（SDK 写标题关键属性）
+- `PutObject bucket={bucket} key={prefix}/{yyyyMM}/{uuid}.zip`（S3 API 名 PascalCase；REST 形态 `PUT /{bucket}/{key}`；SDK 写标题关键属性）
 - 头与元数据: `Content-MD5`、`StorageClass`（按需）
 - 凭证: 实例角色 / 环境变量 / 配置（只写来源，不写值）；SDK 内建重试次数（按需）
 - 失败表: 如 `上传失败 | 降级-保留本地临时文件-告警`
 
 ### 5.7 SFTP / FTP
 
-菜单：`会话与认证 / 传输操作 / 触发与时机 / 失败表`。操作用命令序列原文（代码块，折叠区）。
+菜单：`会话与认证 / 传输操作 / 触发与时机 / 失败表`。操作用大写伪命令序列（`CONNECT`/`CD`/`PUT`/`GET`，对应 sftp 客户端同名小写命令；代码块，折叠区）。
 
 - 会话: `CONNECT {sftp.host}:{22}`，auth 方式；连接复用/池化；**known_hosts 校验有无**（会猜错必写——缺失即中间人风险）
 - 传输操作:
-  ```sftp
+  ```text
   CD /outbound/reports
   PUT {localTmpPath} → {yyyyMM}/report-{orderId}.csv   (overwrite=false)
   ```
@@ -325,7 +326,7 @@ delete {workDir}/{batchId}.csv                 ← 收尾清理
 
 ### 5.12 进程内重计算（重量级库）
 
-不算出站系统，为保序完整仍编号，**不套四段菜单**，主路径两行说清 + 末尾标注：
+不算出站系统，为保序完整仍编号，**不套四段菜单**——主路径与每卡最小集一致（标题内标注「无外部系统」+ 一句话摘要 + 主坐标，关键事实按需）：
 
 - `O5. 进程内（{解析库}）→ 报文结构校验，无外部系统`
 - 关键事实（按需）: 按内容分流（schema 校验 / 逐节点解析 / 大报文分块扫描）
