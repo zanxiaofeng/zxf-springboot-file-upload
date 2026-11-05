@@ -18,7 +18,7 @@
 
 > ❌ **空壳填表**：幂等设计「未实现」、重试策略「无」、错误映射「无特殊」——各占 2–3 行的信息量为零段落。正确做法是整段不出现（formats.md §一省略三档）。
 
-> ❌ **证据泛滥**：主路径贴函数体源码、处理逻辑每步尾随 `file:line`、「无超时」在每个 O 卡重复一遍——结论被证据淹没。正确做法：每卡 1 个主坐标 + ≤ 2 个风险坐标，共性（「O1–O8 均无超时」）上提 Summary 写一次。
+> ❌ **证据泛滥**：主路径贴函数体源码、处理逻辑每步尾随 `file:line`、「无超时」在每个 O 卡重复一遍——结论被证据淹没。正确做法：每卡 1 个主坐标 + ≤ 2 个风险坐标，共性（如「全部出站均无超时」）上提 Summary 写一次。
 
 > ❌ **数据盲区**：卡片齐全、控制流清晰，但 Request / Response Body 只写「JSON body」「含订单信息」一笔带过，无真实字段、无流向标注——数据流动是报告第一位，Body 缺实证即不合格。
 
@@ -81,7 +81,7 @@
 
 </details>
 
-### Outbounds（O2 逐商品循环；O7/O8/O9 为收尾步，失败不影响下单结果；O9 异步）
+### Outbounds（O2 逐商品循环；O7/O8/O9 为收尾步，失败不影响下单结果；O9 at-most-once）
 
 #### O1. gRPC → cart 服务（取购物车）
 
@@ -207,7 +207,7 @@
 **失败表**
 | 症状 | 处置 |
 |---|---|
-| 任意错误 | 忽略-静默丢弃（源码显式丢弃错误，用户可重放补救） |
+| 任意错误 | 忽略-静默丢弃（`_ =` 显式丢弃，可重放补救） |
 
 </details>
 
@@ -325,7 +325,7 @@ INSERT INTO owners (first_name, last_name, address, city, telephone)
 VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.save()（JPA persist）派生
 ```
 
-- 入参：Owner 实体五字段（`model/Owner.java`，@Table owners）；映射：persist 回填 `id` → I1 的 `Location` 头与 body（数据流向标注）
+- 入参：Owner 实体五字段（@Table owners）；映射：persist 回填 `id` → I1 的 `Location` 头与 body（数据流向标注）
 - 附注（不在本链路）：后续读路径参考 `ClinicServiceImpl#getOwner`（按 id 单行查询，形态与上同）
 
 **失败表**
@@ -360,7 +360,6 @@ VALUES (?, ?, ?, ?, ?)     -- ClinicServiceImpl.saveOwner → ownerRepository.sa
 > 受理上传：预检 → 落盘（O1）→ 分发后台扫描（O2–O6），立即 202 返回受理凭证 scanId。
 
 **关键事实**
-- 无幂等——同一文件重复上传每次生成新 scanId
 - 大小双层限制分开归因：multipart 层超限 413（单文件 100MB / 整请求 110MB），业务预检拒绝 400
 - 无扩展名文件通过受理预检（白名单只拦「有扩展名但不支持」），但被 O2 判「类型与扩展名不符」拒绝——终态轮询 REJECTED 而非受理 400
 
@@ -476,7 +475,7 @@ delete {staging}/{uuid}.{ext}                                 ← 失败时清�
 **失败表**
 | 症状 | 处置 |
 |---|---|
-| 不可达 / 协议错误 / 超时 | 致命-中止（fail 策略收口，见 I1 映射下半） |
+| 不可达 / 协议错误 / 超时 | 致命-中止（见 I1 映射下半） |
 | 熔断打开 | 致命-中止（同上） |
 
 </details>
