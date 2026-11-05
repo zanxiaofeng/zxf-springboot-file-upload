@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "skill": "investigate-endpoint",
+  "defaults": {
+    "fresh_context": true,
+    "quality_prompt": "请调查 {target} 的完整执行链路并产出调查报告。",
+    "source_access": "checkout_only_pinned_commit",
+    "dynamic_target_calls": false,
+    "quality_forbidden_reads": [
+      "references/example-*.md",
+      "evals/**"
+    ]
+  },
+  "trigger_cases": [
+    {
+      "id": "trigger-http-zh",
+      "prompt": "帮我调查 POST /api/orders 的完整请求处理流程和下游调用。",
+      "expected_trigger": true,
+      "reason": "HTTP 入口的完整链路调查"
+    },
+    {
+      "id": "trigger-grpc-en",
+      "prompt": "Trace the full execution path of oteldemo.CheckoutService/PlaceOrder from source code.",
+      "expected_trigger": true,
+      "reason": "gRPC 入口的源码链路追踪"
+    },
+    {
+      "id": "trigger-consumer",
+      "prompt": "梳理这个 Kafka consumer 从收到消息到写库和失败处理的完整流程。",
+      "expected_trigger": true,
+      "reason": "MQ consumer 入站操作"
+    },
+    {
+      "id": "trigger-scheduled",
+      "prompt": "调查 nightly-cleanup 定时任务触发后的执行链路、外部交互和错误处置。",
+      "expected_trigger": true,
+      "reason": "定时任务入口"
+    },
+    {
+      "id": "trigger-security-mode",
+      "prompt": "从源码审查上传接口的完整调用链，重点关注鉴权、隐式出站和敏感数据流。",
+      "expected_trigger": true,
+      "reason": "明确安全目的的入口链路调查"
+    },
+    {
+      "id": "negative-function",
+      "prompt": "这个 calculateTotal 函数是做什么的？只需要解释函数本身。",
+      "expected_trigger": false,
+      "reason": "孤立函数解释，不需要流程追踪"
+    },
+    {
+      "id": "negative-edit",
+      "prompt": "帮我把这个接口的超时配置改成 3 秒并补充单元测试。",
+      "expected_trigger": false,
+      "reason": "代码修改任务，没有调查交付物"
+    },
+    {
+      "id": "negative-general-reading",
+      "prompt": "这个项目用了哪些设计模式？给我一个架构概览即可。",
+      "expected_trigger": false,
+      "reason": "通用代码阅读，无目标入站操作"
+    }
+  ],
+  "quality_cases": [
+    {
+      "id": "smoke-crud",
+      "tier": "smoke",
+      "repository": "https://github.com/spring-petclinic/spring-petclinic-rest.git",
+      "commit": "5180cc9bd0163393c4e628bedc1bc4c27cfaab1b",
+      "target": "POST /api/owners",
+      "entry_evidence": "src/main/java/org/springframework/samples/petclinic/rest/controller/v1/OwnerRestControllerV1.java#addOwner",
+      "baseline": "evals/baseline.md#smoke-crud",
+      "comparison": [
+        "with-skill",
+        "without-skill"
+      ]
+    },
+    {
+      "id": "smoke-distributed",
+      "tier": "smoke",
+      "repository": "https://github.com/open-telemetry/opentelemetry-demo.git",
+      "commit": "0aa29ab5e1e34bbf33239d495976109cdef384cc",
+      "target": "oteldemo.CheckoutService/PlaceOrder",
+      "entry_evidence": "src/checkout/main.go#PlaceOrder",
+      "baseline": "evals/baseline.md#smoke-distributed",
+      "comparison": [
+        "with-skill",
+        "without-skill"
+      ]
+    },
+    {
+      "id": "smoke-async-upload",
+      "tier": "smoke",
+      "repository": "https://github.com/zanxiaofeng/zxf-springboot-file-upload.git",
+      "commit": "cc0917ce78e4766069557a387eabd73fc058b71f",
+      "target": "POST /api/files/async/upload 及独立轮询入口",
+      "entry_evidence": "src/main/java/zxf/upload/rest/fileupload/FileUploadController.java#asyncUpload",
+      "baseline": "evals/baseline.md#smoke-async-upload",
+      "comparison": [
+        "with-skill",
+        "without-skill"
+      ]
+    },
+    {
+      "id": "heldout-sync-upload",
+      "tier": "held-out",
+      "repository": "https://github.com/zanxiaofeng/zxf-springboot-file-upload.git",
+      "commit": "cc0917ce78e4766069557a387eabd73fc058b71f",
+      "target": "POST /api/files/sync/upload",
+      "entry_evidence": "src/main/java/zxf/upload/rest/fileupload/FileUploadController.java#syncUpload",
+      "baseline": "evals/baseline.md#heldout-sync-upload",
+      "comparison": [
+        "with-skill",
+        "without-skill"
+      ]
+    }
+  ]
+}
