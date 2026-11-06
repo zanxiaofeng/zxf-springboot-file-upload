@@ -76,7 +76,7 @@
 **关键事实**
 - 无方法级 `@Transactional` 时，事务由当前 repository 调用链承担；不以「无注解」直接推断「无事务」。
 
-<details><summary>派生 SQL、数据映射与失败处置</summary>
+<details><summary>派生 SQL、数据映射与失败表</summary>
 
 **Statement（派生）**
 
@@ -92,8 +92,10 @@ VALUES (?, ?, ?, ?, ?)
 - 五个请求字段 ← I1 Request Body。
 - 回填 `id` → I1 Response Body 与 `Location`。
 
-**失败处置**
+**失败表**
 
-- 约束冲突：向 I1 传播，由全局异常翻译层映射；不额外臆造重试。
+| 症状 | 处置 |
+|---|---|
+| 约束冲突 | 致命-中止（映射见 I1） |
 
 </details>

@@ -57,7 +57,7 @@ python scripts/validate_report.py report.md
 ## 参考资源
 
 - `references/investigation-guide.md`：预检、入口定位、证据台账、证据等级、覆盖门禁和安全边界。
-- `references/report-contract.md`：报告骨架、卡片语义、数据与错误映射、证据和不确定性规则。
+- `references/report-contract.md`：报告骨架、卡片语义与排版（折叠区、关键事实写法、两列失败表）、数据与错误映射、证据和不确定性规则。
 - `references/protocol-schemas.md`：各 Inbound／Outbound 类型的按需调查菜单。
 - `references/example-crud.md`：单体 CRUD 简例。
 - `references/example-distributed.md`：分布式、多调用与控制流范例。

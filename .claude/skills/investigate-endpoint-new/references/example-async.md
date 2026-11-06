@@ -194,7 +194,7 @@ yara -s --fail-on-warnings {rulesPath} {stagedFile}
 
 > CLEAN 入库、INFECTED 隔离、REJECTED／ERROR 清理；入库文件名 → I2 `filePath`。
 
-<details><summary>操作序列与降级</summary>
+<details><summary>操作序列与失败表</summary>
 
 ```text
 copy   {staging}/{uuid}.{ext} → {storage}/{uuid}.{ext}
@@ -202,7 +202,13 @@ move   {staging}/{uuid}.{ext} → {quarantine}/{uuid}.quarantined
 delete {staging}/{uuid}.{ext}
 ```
 
-- 跨文件系统 move 失败时降级 copy + delete；再失败仅记录错误并可能遗留 staging 文件。
+**失败表**
+
+| 症状 | 处置 |
+|---|---|
+| 隔离 move 跨文件系统失败 | 降级-copy+delete |
+| 降级 copy 仍失败 | 忽略-记日志（滞留 staging） |
+
 - fail-open 只允许引擎故障降级入库；业务拒绝和已检出威胁不得借此放行。
 </details>
 
