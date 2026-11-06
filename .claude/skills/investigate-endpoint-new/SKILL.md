@@ -1,5 +1,5 @@
 ---
-name: investigate-endpoint
+name: investigate-endpoint-new
 description: Investigate an inbound operation from source code and produce an evidence-backed execution-path report covering contracts, direct interactions, data mapping, control flow, and error propagation. Use for HTTP/gRPC endpoints, MQ consumers, scheduled jobs, CLI commands, or event handlers when asked to trace or investigate the full flow（调查/梳理接口、调用链、请求处理流程）. Not for isolated function explanations or general code reading that needs no flow tracing.
 ---
 

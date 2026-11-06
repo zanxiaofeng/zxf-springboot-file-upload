@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "skill": "investigate-endpoint",
+  "skill": "investigate-endpoint-new",
   "defaults": {
     "fresh_context": true,
     "quality_prompt": "请调查 {target} 的完整执行链路并产出调查报告。",
