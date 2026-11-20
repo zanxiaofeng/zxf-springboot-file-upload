@@ -6,6 +6,7 @@
 
 - 调查范围：静态调查 checkout 的 `PlaceOrder`，覆盖本服务直接一跳；frontend 仅在说明客户端错误翻译时涉及。
 - 功能：取购物车 → 逐商品报价与换汇 → 运费报价与换汇 → 扣款 → 发货 → 清购物车、邮件和订单事件。
+  主链路：`O1 → O2×N → (O3 → O4) → O5 → O6 └─ 收尾 O7 ∥ O8 ∥ O9`（收尾失败不改变下单结果）
 - 外部依赖：O1（gRPC → cart）、O2（gRPC → product-catalog + currency，含两个顺序调用）、O3（HTTP → shipping 报价）、O4（gRPC → currency）、O5（gRPC → payment）、O6（HTTP → shipping 发货）、O7（gRPC → cart 清空）、O8（HTTP → email）、O9（Kafka → orders）；共 9 张 O 卡，其中 5 张 gRPC、3 张 HTTP、1 张 Kafka，涉及 4 个 gRPC 目标服务、2 个 HTTP 目标服务和 1 个 Kafka topic。
 - 注意：O1–O7 未显式配置超时／deadline；O8 显式 1s；O9 为 at-most-once；O7–O9 失败不改变已完成的下单结果。
 
